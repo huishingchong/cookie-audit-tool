@@ -1,3 +1,5 @@
+import argparse
+
 def batch(iterable, n=1):
     """
     Turn any iterable into a generator of batches of batch size n
