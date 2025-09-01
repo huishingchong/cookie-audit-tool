@@ -5,7 +5,7 @@ import logging
 import argparse
 import sys
 from consentcrawl import crawl, utils, blocklists
-
+from urllib.parse import urlparse
 
 async def process_urls(
     urls,
@@ -118,7 +118,20 @@ def cli():
             )
 
     elif args.url != "":
-        urls = args.url.split(",")
+        candidates = [u.strip() for u in args.url.split(",")]
+        urls = []
+        # Validate url syntax
+        for u in candidates:
+            if not u:
+                continue
+            if "://" not in u:
+                u = "https://" + u
+            parsed_url = urlparse(u)
+            if not parsed_url.scheme in ("http", "https") or not parsed_url.hostname or "." not in parsed_url.hostname:
+                logging.error(f"Invalid URL skipped: {u}")
+                continue
+            urls.append(f"{parsed_url.scheme}://{parsed_url.hostname}")
+
     else:
         logging.error("No URL or valid .txt file with URLs to test")
 
