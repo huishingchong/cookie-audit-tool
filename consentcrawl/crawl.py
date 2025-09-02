@@ -20,7 +20,22 @@ CONSENT_MANAGERS_FILE = f"{MODULE_DIR}/assets/consent_managers.yml"
 DEFAULT_UA_STRINGS = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36 Edg/116.0.1938.81"
 ]
-ACCEPT_TEXT = re.compile(r"\b(accept|agree|allow|consent|yes|i agree)\b", re.I)
+
+ACCEPT_TEXT = re.compile(
+    r"\b("
+    r"accept|agree|allow|consent|ok|got it|"
+    r"akzeptieren|zustimmen|alle akzeptieren|"
+    r"accepter|tout accepter|"
+    r"aceptar|acepto|aceptar todo|aceptar todas|"
+    r"accetta|accetto|accetta tutto|"
+    r"aceitar|aceito|aceitar tudo|"
+    r"aanvaarden|alles accepteren|"
+    r"godkänna|acceptera alla|"
+    r"同意|接受|許可|承諾|同意する|"
+    r"허용|동의"
+    r")\b",
+    re.IGNORECASE
+)
 
 def get_extract_schema():
     return {
@@ -141,6 +156,20 @@ async def click_consent_manager(page):
                 still_visible = False
             cmp["status"] = "clicked" if not still_visible else "clicked-uncertain"
             return cmp
+    
+    # FALLBACK
+    # 1) page-wide
+    btn = page.get_by_role("button", name=ACCEPT_TEXT).first
+    if await btn.count() > 0 and await btn.is_visible():
+        if await _try_click(btn):
+            return {"id":"fallback-text","name":"Text search","status":"clicked"}
+
+    # 2) all iframes
+    for frame in page.frames:
+        btn = frame.get_by_role("button", name=ACCEPT_TEXT).first
+        if await btn.count() > 0 and await btn.is_visible():
+            if await _try_click(btn):
+                return {"id":"fallback-text-in-frame","name":"Text search (frame)","status":"clicked"}
 
     logging.debug(f"Unable to accept cookies on: {page.url}")
     return {}
@@ -257,7 +286,7 @@ async def crawl_url(
         if screenshot:
             try:
                 path_pre = f'./screenshots/screenshot_{output["id"]}_{run_tag}.png'
-                await page.screenshot(path=path_pre, timeout=15000)
+                await page.locator("body").screenshot(path=path_pre, timeout=15000)
                 output["screenshot_files"] = [path_pre]
             except Exception as e:
                 logging.debug(f"Pre-consent screenshot failed: {e}")
@@ -292,7 +321,7 @@ async def crawl_url(
         #     )
         # )
         # cookies = await browser_context.cookies()
-
+        
         pre_len = len(req_urls)
         # page_host = host_from_url(url)
         # page_reg = registrable_domain(page_host)
@@ -327,10 +356,9 @@ async def crawl_url(
                 "path": c.get("path"),
                 "secure": bool(c.get("secure")),
                 "httpOnly": bool(c.get("httpOnly")),
-                "sameSite": c.get("sameSite"),  # "Lax", "Strict" or "None"
+                "sameSite": c.get("sameSite"),
                 "expires": int(c.get("expires", 0)),
-                # Derive helper fields (session vs persistent)
-                "session": (int(c.get("expires", 0)) == 0),
+                "session": int(c.get("expires", 0) or 0) <= 0,
                 "expires_days": (
                     (date.fromtimestamp(int(c["expires"])) - date.today()).days
                     if int(c.get("expires", 0)) > 0 else None
@@ -349,10 +377,10 @@ async def crawl_url(
         #     "error",
         #     "",
         # ]:
-        if screenshot and output["consent_manager"].get("status") == "clicked":
+        if screenshot and output["consent_manager"].get("status")  in ("clicked", "clicked-uncertain"):
             try:
                 path_post = f'./screenshots/screenshot_{output["id"]}_{run_tag}_afterconsent.png'
-                await page.screenshot(path=path_post, timeout=15000)
+                await page.locator("body").screenshot(path=path_post, timeout=15000)
                 output["screenshot_files"].append(path_post)
             except Exception as e:
                 logging.debug(f"Post-consent screenshot failed: {e}")
@@ -402,7 +430,10 @@ async def crawl_url(
             if is_blocklisted_host(host_from_url(r), tracking_set)
         })
 
-        cookies = await browser_context.cookies([url])
+        all_cookies = await browser_context.cookies()
+        current_host = host_from_url(page.url) or host_from_url(url)
+        site_etld1 = registrable_domain(current_host)
+        cookies = [c for c in all_cookies if registrable_domain(c.get("domain", "").lstrip(".")) == site_etld1]
 
         output["cookies_all"] = [
             {
@@ -413,10 +444,10 @@ async def crawl_url(
                 "httpOnly": bool(c.get("httpOnly")),
                 "sameSite": c.get("sameSite"),
                 "expires": int(c.get("expires", 0)),
-                "session": (int(c.get("expires", 0)) == 0),
+                "session": int(c.get("expires", 0) or 0) <= 0,
                 "expires_days": (
                     (date.fromtimestamp(int(c["expires"])) - date.today()).days
-                    if int(c.get("expires", 0)) > 0 else None
+                    if int(c.get("expires", 0) or 0) > 0 else None
                 ),
             }
             for c in cookies
