@@ -25,7 +25,7 @@ async def process_urls(
         batch_size=batch_size,
         results_function=crawl.store_crawl_results,
         tracking_domains_list=tracking_domains_list,
-        browser_config={"headless": headless, "channel": "msedge"},
+        browser_config={"headless": headless, "channel": "chrome"},
         results_db_file=results_db_file,
         screenshot=screenshot,
     )
