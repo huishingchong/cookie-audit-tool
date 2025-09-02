@@ -92,16 +92,18 @@ async def click_consent_manager(page):
 
             if t == "iframe":
                 # Narrow into CMP iframe if present
-                if await parent.locator(v).count() > 0:
+                try:
+                    # Wait for the iframe to be attached, then restrict all further lookups to it
+                    await parent.locator(v).first.wait_for(state="attached", timeout=3000)
                     parent = parent.frame_locator(v).first
-                else:
-                    # This CMP is not present; try next CMP
+                except Exception:
+                    # Iframe not present => this CMP likely isn't here; try next CMP
                     parent = None
                     break
 
             elif t == "css-selector":
                 loc = parent.locator(v).first
-                if await loc.is_visible():
+                if await loc.count() > 0 and await loc.is_visible():
                     # Prefer visible button-like descendants with Accept text
                     preferred = loc.locator("button, a, [role='button']").filter(has_text=ACCEPT_TEXT).first
                     target = preferred if await preferred.count() > 0 else loc
@@ -109,16 +111,14 @@ async def click_consent_manager(page):
 
             elif t == "css-selector-list":
                 for selector in v:
-                    loc = parent.locator(selector)
-                    if await loc.first.is_visible():
-                        # Go for explicit Accept/Agree text within clickable elements
-                        preferred = parent.locator("button, a, [role='button']").filter(has_text=ACCEPT_TEXT).first
+                    loc = parent.locator(selector).first
+                    if await loc.count() > 0 and await loc.is_visible():
+                        preferred = loc.locator("button, a, [role='button']").filter(has_text=ACCEPT_TEXT).first
                         if await preferred.count() > 0:
                             target = preferred
                             cmp["selector-list-item"] = selector
                             break
-                        # Fallback: first visible node under the selector
-                        target = loc.first
+                        target = loc
                         cmp["selector-list-item"] = selector
                         break
 
@@ -367,6 +367,8 @@ async def crawl_url(
             for c in cookies
         ]
 
+        output["cookies_no_consent"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
+
         # try to accept full marketing consent
         logging.debug(
             f"Trying to accept full marketing consent on {output['domain_name']}"
@@ -452,6 +454,8 @@ async def crawl_url(
             }
             for c in cookies
         ]
+
+        output["cookies_all"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
 
         await browser_context.close()
 
