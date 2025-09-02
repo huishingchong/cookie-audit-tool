@@ -107,21 +107,17 @@ class Blocklists:
 
     def get_blocklists_data(self):
         for blocklist in self.blocklists:
-            logging.info(
-                f"Retrieving blocklist: '{blocklist['name']}' from: {blocklist['url']}"
-            )
-
+            logging.info(f"Retrieving blocklist: '{blocklist['name']}' from: {blocklist['url']}")
             if blocklist["type"] == "hostfile":
                 data = requests.get(blocklist["url"]).text
                 blocklist["data"] = self.parse_hostfile(data)
-
             elif blocklist["type"] == "blocklist":
                 data = requests.get(blocklist["url"]).text.split("\n")
                 blocklist["data"] = self.parse_blocklist(data)
-
             elif blocklist["type"] == "domains":
-                blocklist["data"] = requests.get(blocklist["url"]).text.split("\n")
-
+                lines = requests.get(blocklist["url"]).text.split("\n")
+                cleaned = [ln.strip() for ln in lines if ln.strip() and not ln.strip().startswith("#")]
+                blocklist["data"] = cleaned
             else:
                 raise Exception(f"Unknown blocklist type {blocklist['type']}")
 
