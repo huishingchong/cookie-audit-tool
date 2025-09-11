@@ -14,6 +14,7 @@ async def process_urls(
     headless=True,
     screenshot=True,
     results_db_file="crawl_results.db",
+    flow="accept-all"
 ):
     """
     Start the Playwright browser, run the URLs to test in batches asynchronously
@@ -28,6 +29,7 @@ async def process_urls(
         browser_config={"headless": headless, "channel": "chrome"},
         results_db_file=results_db_file,
         screenshot=screenshot,
+        flow=flow,
     )
 
 
@@ -81,6 +83,12 @@ def cli():
     parser.add_argument(
         "--blocklists", "-bf", default=None, help="Path to custom blocklists file"
     )
+    parser.add_argument(
+        "--flow",
+        default="accept-all",
+        choices=["accept-all", "reject-all"],
+        help="Consent path to run per URL (default: accept-all)",
+    )
 
     args = parser.parse_args()
 
@@ -106,16 +114,16 @@ def cli():
 
     # List of URLs to test
     if args.url.endswith(".txt"):
+        urls = []
+        seen = set()
         with open(args.url, "r") as f:
-            urls = list(
-                set(
-                    [
-                        l.strip().lower()
-                        for l in set(f.readlines())
-                        if len(l) > 0 and not l.startswith("#")
-                    ]
-                )
-            )
+            for line in f:
+                s = line.strip().lower()
+                if not s or s.startswith("#"):
+                    continue
+                if s not in seen:
+                    seen.add(s)
+                    urls.append(s)
 
     elif args.url != "":
         candidates = [u.strip() for u in args.url.split(",")]
@@ -150,6 +158,7 @@ def cli():
             headless=args.headless,
             screenshot=args.screenshot,
             results_db_file=args.db_file,
+            flow=args.flow,
         )
     )
 
