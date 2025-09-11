@@ -37,25 +37,55 @@ ACCEPT_TEXT = re.compile(
     re.IGNORECASE
 )
 
+REJECT_TEXT = re.compile(
+    r"\b("
+    r"reject|deny|decline|disagree|continue without|"
+    r"alles ablehnen|ich lehne ab|"
+    r"tout refuser|refuser|"
+    r"rechazar|"
+    r"rifiuto|"
+    r"recusar|"
+    r"weigeren|"
+    r"拒否|不同意|拒绝|拒否する|"
+    r"거부|동의하지 않음"
+    r")\b",
+    re.IGNORECASE
+)
+
+MANAGE_TEXT = re.compile(
+    r"\b(manage|preferences|settings|more options|customis(e|z)e|"
+    r"cookie settings|manage options|mehr optionen|einstellungen|"
+    r"paramètres|opciones|opties)\b",
+    re.IGNORECASE
+)
+
 def get_extract_schema():
     return {
         "id": "STRING",
         "url": "STRING",
         "domain_name": "STRING",
         "extraction_datetime": "STRING",
-        "cookies_all": "STRING",
-        "cookies_no_consent": "STRING",
-        "third_party_domains_all": "STRING",
-        "third_party_domains_no_consent": "STRING",
-        "tracking_domains_all": "STRING",
-        "tracking_domains_no_consent": "STRING",
+
+        "pre_cookies": "STRING",
+        "pre_third_party_domains": "STRING",
+        "pre_tracking_domains": "STRING",
+
+        "post_cookies": "STRING",
+        "post_third_party_domains": "STRING",
+        "post_tracking_domains": "STRING",
+
+        "consent_action": "STRING",   # 'accept' or 'reject'
+        "consent_result": "STRING",   # 'clicked', 'clicked-uncertain', 'error', ''
+
         "consent_manager": "STRING",
         "screenshot_files": "STRING",
         "meta_tags": "STRING",
         "json_ld": "STRING",
         "status": "STRING",
         "status_msg": "STRING",
+        "landed_url": "STRING",
     }
+
 
 
 def get_consent_managers():
@@ -64,115 +94,175 @@ def get_consent_managers():
         return data
 
 async def _try_click(locator):
-    # Try a safe click first; if it fails, force it.
-    await locator.scroll_into_view_if_needed()
+    # Always try to bring into view first
+    try:
+        await locator.scroll_into_view_if_needed(timeout=2000)
+    except Exception:
+        pass
+
+    # 1) Trial + normal click
     try:
         await locator.click(timeout=3000, trial=True)
         await locator.click(timeout=3000)
         return True
-    except PlaywrightTimeoutError:
+    except Exception:
+        pass
+
+    # 2) Force click
+    try:
         await locator.click(timeout=3000, force=True)
+        return True
+    except Exception:
+        pass
+
+    # 3) JS click (last resort)
+    try:
+        await locator.evaluate("(el) => el.click()")
         return True
     except Exception:
         return False
     
-async def click_consent_manager(page):
+async def click_consent_manager(page, action: str = "accept"):
     """
-    Try known CMPs; if we find a container but not a clear CTA, fall back to text-based Accept/Agree hits.
-    Mark status 'clicked' only if the banner actually disappears or requests spike after the click.
+    action: 'accept' | 'reject'
+    Try known CMPs for given action; if not found, fall back to text search.
+    Returns a dict with 'status' when click likely happened.
     """
     consent_managers = get_consent_managers()
+    text_pattern = ACCEPT_TEXT if action == "accept" else REJECT_TEXT
+
     for cmp in consent_managers:
         parent = page
         target = None
 
-        for action in cmp["actions"]:
-            t = action["type"]
-            v = action["value"]
+        for act in cmp.get("actions", []):
+            t = act.get("type")
+            v = act.get("value")
 
             if t == "iframe":
-                # Narrow into CMP iframe if present
                 try:
-                    # Wait for the iframe to be attached, then restrict all further lookups to it
                     await parent.locator(v).first.wait_for(state="attached", timeout=3000)
                     parent = parent.frame_locator(v).first
                 except Exception:
-                    # Iframe not present => this CMP likely isn't here; try next CMP
                     parent = None
                     break
 
             elif t == "css-selector":
                 loc = parent.locator(v).first
                 if await loc.count() > 0 and await loc.is_visible():
-                    # Prefer visible button-like descendants with Accept text
-                    preferred = loc.locator("button, a, [role='button']").filter(has_text=ACCEPT_TEXT).first
-                    target = preferred if await preferred.count() > 0 else loc
+                    preferred = loc.locator("button, a, [role='button']").filter(has_text=text_pattern).first
+                    if await preferred.count() > 0:
+                        target = preferred
+                    elif action == "accept":
+                        # For accept we allow falling back to the provided selector (often the Accept CTA)
+                        target = loc
+                    # For reject we require a text match; otherwise keep searching
+                if target is not None:
                     break
 
             elif t == "css-selector-list":
                 for selector in v:
                     loc = parent.locator(selector).first
                     if await loc.count() > 0 and await loc.is_visible():
-                        preferred = loc.locator("button, a, [role='button']").filter(has_text=ACCEPT_TEXT).first
+                        preferred = loc.locator("button, a, [role='button']").filter(has_text=text_pattern).first
                         if await preferred.count() > 0:
                             target = preferred
                             cmp["selector-list-item"] = selector
                             break
-                        target = loc
-                        cmp["selector-list-item"] = selector
-                        break
-
-            elif t == "xpath":
-                # Not implemented; skip
-                continue
+                        elif action == "accept":
+                            # For accept we can still use the provided selector
+                            target = loc
+                            cmp["selector-list-item"] = selector
+                            break
+                        # For reject: no text match, keep iterating selectors
 
         if parent is None:
-            # CMP not on page; move to next
             continue
 
         if target is not None:
-            try:
-                # Snapshot pre-click request count to detect any network activity after the click
-                pre_req_count = len((await page.context.storage_state())["origins"])  # cheap op; not perfect
-            except Exception:
-                pre_req_count = 0
-
             ok = await _try_click(target)
             if not ok:
                 cmp["status"] = "error"
-                cmp["error"] = "click failed"
+                cmp["error"] = f"{action} click failed"
                 return cmp
 
-            # Give the page a brief chance to load/settle; banners often self-remove
             try:
                 await page.wait_for_load_state("networkidle", timeout=3000)
             except PlaywrightTimeoutError:
                 pass
 
-            # Heuristic: banner gone or accept CTA no longer visible?
             try:
                 still_visible = await target.is_visible()
             except Exception:
                 still_visible = False
+
             cmp["status"] = "clicked" if not still_visible else "clicked-uncertain"
+            cmp["clicked_action"] = action
             return cmp
-    
-    # FALLBACK
-    # 1) page-wide
-    btn = page.get_by_role("button", name=ACCEPT_TEXT).first
+
+    # FALLBACK: text search on page, then frames
+    btn = page.get_by_role("button", name=text_pattern).first
     if await btn.count() > 0 and await btn.is_visible():
         if await _try_click(btn):
-            return {"id":"fallback-text","name":"Text search","status":"clicked"}
+            return {"id":"fallback-text","name":"Text search","status":"clicked","clicked_action":action}
 
-    # 2) all iframes
     for frame in page.frames:
-        btn = frame.get_by_role("button", name=ACCEPT_TEXT).first
-        if await btn.count() > 0 and await btn.is_visible():
-            if await _try_click(btn):
-                return {"id":"fallback-text-in-frame","name":"Text search (frame)","status":"clicked"}
+        try:
+            btn = frame.get_by_role("button", name=text_pattern).first
+            if await btn.count() > 0 and await btn.is_visible():
+                if await _try_click(btn):
+                    return {"id":"fallback-text-in-frame","name":"Text search (frame)","status":"clicked","clicked_action":action}
+        except Exception:
+            continue
+    
+    # Fallback: open "Manage/Preferences", then try Reject again
+    if action == "reject":
+        try:
+            # Try common OneTrust open-preferences first (fast path)
+            open_candidates = [
+                "#onetrust-pc-btn-handler",          # OneTrust "Preferences" button
+            ]
+            opened = False
+            for sel in open_candidates:
+                loc = page.locator(sel).first
+                if await loc.count() > 0:
+                    if await _try_click(loc):
+                        opened = True
+                        break
 
-    logging.debug(f"Unable to accept cookies on: {page.url}")
+            # If not opened yet, try generic text-based manage button
+            if not opened:
+                btn = page.get_by_role("button", name=MANAGE_TEXT).first
+                if await btn.count() > 0:
+                    opened = await _try_click(btn)
+
+            if opened:
+                # Small settle wait
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=2000)
+                except Exception:
+                    pass
+
+                # Try Reject again (often visible in the preferences modal)
+                reject_locators = [
+                    "#onetrust-reject-all-handler",     # OneTrust Reject (modal)
+                ]
+                # Prefer text match if available
+                btn = page.get_by_role("button", name=REJECT_TEXT).first
+                if await btn.count() > 0 and await _try_click(btn):
+                    return {"id":"fallback-manage-text","name":"Manage then Reject (text)","status":"clicked","clicked_action":"reject"}
+
+                # Otherwise try common selector(s)
+                for sel in reject_locators:
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0 and await _try_click(loc):
+                        return {"id":"fallback-manage-sel","name":"Manage then Reject (selector)","status":"clicked","clicked_action":"reject"}
+        except Exception:
+            pass
+
+    logging.debug(f"Unable to {action} cookies on: {page.url}")
     return {}
+
 
 
 async def get_jsonld(page):
@@ -214,6 +304,7 @@ async def crawl_url(
     screenshot=True,
     device=None,
     wait_for_timeout=5000,
+    consent_action: str = "accept",
 ):
     """
     Open a new browser context with a URL and extract data about cookies and
@@ -230,13 +321,21 @@ async def crawl_url(
     """
     output = {k: None for k in get_extract_schema().keys()}
     output["screenshot_files"] = []
-
+    
     try:
-        if not url.startswith("http"):
-            url = "https://" + url
+        raw_input = url.strip()
+        added_scheme = False
+        if not re.match(r"^https?://", raw_input, re.I):
+            url = "https://" + raw_input
+            added_scheme = True
+        else:
+            url = raw_input
+        # if not url.startswith("http"):
+        #     url = "https://" + url
 
         output["url"] = url
         output["extraction_datetime"] = str(datetime.now())
+
         if device is None:
             device = {}
         if tracking_domains_list is None:
@@ -255,26 +354,36 @@ async def crawl_url(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
 
-        # output["domain_name"] = re.search("(?:https?://)?(?:www.)?([^/]+)", url).group(
-        #     1
-        # )
-        output["domain_name"] = host_from_url(url) or url
-
-        base64_url = base64.urlsafe_b64encode(
-            output["domain_name"].encode("ascii")
-        ).decode("ascii")
-
-        output["id"] = base64_url
-        run_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-
-        logging.info(f"Start extracting data from domain {output['domain_name']}")
-
         req_urls = []
-
         page = await browser_context.new_page()
         page.on("request", lambda req: req_urls.append(req.url))
 
-        await page.goto(url, wait_until="load", timeout=90000)
+        try:
+            await page.goto(url, wait_until="load", timeout=90000)
+        except Exception:
+            if added_scheme and url.startswith("https://"):
+                alt = "http://" + raw_input
+                await page.goto(alt, wait_until="load", timeout=90000)
+                url = alt
+            else:
+                raise
+        
+                # output["domain_name"] = re.search("(?:https?://)?(?:www.)?([^/]+)", url).group(
+        #     1
+        # )
+        output["landed_url"] = page.url
+        landed_host = host_from_url(page.url) or host_from_url(url) or raw_input
+        output["domain_name"] = landed_host
+        site_etld1 = registrable_domain(landed_host) or landed_host
+        # base64_url = base64.urlsafe_b64encode(
+        #     output["domain_name"].encode("ascii")
+        # ).decode("ascii")
+        id_source = landed_host.encode("idna").decode("ascii")
+
+        output["id"] = base64.urlsafe_b64encode(id_source.encode("ascii")).decode("ascii")
+        run_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+        logging.info(f"Extracting data from domain {output['domain_name']}")
 
         await page.wait_for_timeout(2000)
         await page.mouse.move(543, 123)
@@ -322,24 +431,20 @@ async def crawl_url(
         # )
         # cookies = await browser_context.cookies()
         
-        pre_len = len(req_urls)
-        # page_host = host_from_url(url)
-        # page_reg = registrable_domain(page_host)
-        
-        thirdparty_requests_pre = [r for r in req_urls if is_third_party(r, url)]
+        thirdparty_requests_pre = [r for r in req_urls if is_third_party(r, page.url)]
 
-        output["third_party_domains_no_consent"] = sorted({
-            registrable_domain(r) for r in thirdparty_requests_pre
-            if registrable_domain(r)
+        output["pre_third_party_domains"] = sorted({
+            registrable_domain(host_from_url(r))
+            for r in thirdparty_requests_pre
+            if registrable_domain(host_from_url(r))
         })
-
-        tracking_set = set(tracking_domains_list)
-
-        output["tracking_domains_no_consent"] = sorted({
-            registrable_domain(r)
+        tracking_set = {h.lower() for h in (tracking_domains_list or [])}
+        output["pre_tracking_domains"] = sorted({
+            registrable_domain(host_from_url(r))
             for r in thirdparty_requests_pre
             if is_blocklisted_host(host_from_url(r), tracking_set)
         })
+
 
         # cookies = await browser_context.cookies([url])
 
@@ -349,7 +454,7 @@ async def crawl_url(
         all_cookies = await browser_context.cookies()
         cookies = [c for c in all_cookies if registrable_domain(c.get("domain", "").lstrip(".")) == site_etld1]
 
-        output["cookies_no_consent"] = [
+        output["pre_cookies"] = [
             {
                 "name": c["name"],
                 "domain": c["domain"],
@@ -366,26 +471,27 @@ async def crawl_url(
             }
             for c in cookies
         ]
+        output["pre_cookies"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
 
-        output["cookies_no_consent"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
-
-        # try to accept full marketing consent
-        logging.debug(
-            f"Trying to accept full marketing consent on {output['domain_name']}"
-        )
-        output["consent_manager"] = await click_consent_manager(page)
+        pre_len = len(req_urls)
+        output["consent_action"] = consent_action  # 'reject' for this phase
+        logging.debug(f"Trying to {consent_action} on {output['domain_name']}")
+        cmp = await click_consent_manager(page, action=consent_action)
+        output["consent_manager"] = cmp
+        output["consent_result"] = cmp.get("status", "")
 
         # if screenshot and output["consent_manager"].get("status", "") not in [
         #     "error",
         #     "",
         # ]:
-        if screenshot and output["consent_manager"].get("status")  in ("clicked", "clicked-uncertain"):
+        if screenshot and output.get("consent_result") in ("clicked", "clicked-uncertain"):
             try:
-                path_post = f'./screenshots/screenshot_{output["id"]}_{run_tag}_afterconsent.png'
+                path_post = f'./screenshots/screenshot_{output["id"]}_{run_tag}_after_{consent_action}.png'
                 await page.locator("body").screenshot(path=path_post, timeout=15000)
                 output["screenshot_files"].append(path_post)
             except Exception as e:
                 logging.debug(f"Post-consent screenshot failed: {e}")
+
 
         # thirdparty_requests = list(
         #     filter(lambda req_url: not output["domain_name"] in req_url, req_urls)
@@ -419,25 +525,24 @@ async def crawl_url(
         #     r for r in req_urls if is_third_party(r, url)
         # ]
 
-        thirdparty_requests_post = [
-            r for r in req_urls[pre_len:] if is_third_party(r, url)
-        ]
-        output["third_party_domains_all"] = sorted({
-            registrable_domain(r) for r in thirdparty_requests_post
-            if registrable_domain(r)
+        thirdparty_requests_post = [r for r in req_urls[pre_len:] if is_third_party(r, page.url)]
+        output["post_third_party_domains"] = sorted({
+            registrable_domain(host_from_url(r))
+            for r in thirdparty_requests_post
+            if registrable_domain(host_from_url(r))
         })
-        output["tracking_domains_all"] = sorted({
-            registrable_domain(r)
+        output["post_tracking_domains"] = sorted({
+            registrable_domain(host_from_url(r))
             for r in thirdparty_requests_post
             if is_blocklisted_host(host_from_url(r), tracking_set)
         })
+
 
         all_cookies = await browser_context.cookies()
         current_host = host_from_url(page.url) or host_from_url(url)
         site_etld1 = registrable_domain(current_host)
         cookies = [c for c in all_cookies if registrable_domain(c.get("domain", "").lstrip(".")) == site_etld1]
-
-        output["cookies_all"] = [
+        output["post_cookies"] = [
             {
                 "name": c["name"],
                 "domain": c["domain"],
@@ -454,8 +559,7 @@ async def crawl_url(
             }
             for c in cookies
         ]
-
-        output["cookies_all"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
+        output["post_cookies"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
 
         await browser_context.close()
 
@@ -481,6 +585,7 @@ async def crawl_batch(
     tracking_domains_list=None,
     browser_config=None,
     screenshot=False,
+    flow="reject-all",
     **kwargs,
 ):
     """
@@ -503,6 +608,7 @@ async def crawl_batch(
                     browser=browser,
                     tracking_domains_list=tracking_domains_list,
                     screenshot=screenshot,
+                    consent_action=("accept" if flow == "accept-all" else "reject"),
                 )
                 for url in urls_batch
             ]
