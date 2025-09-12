@@ -13,6 +13,8 @@ from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 from playwright.async_api import async_playwright
 from consentcrawl import utils
 from consentcrawl.domain_utils import registrable_domain, is_third_party, host_from_url, is_blocklisted_host
+# from consentcrawl.consent.flows import reject_all as _flow_reject_all, customise as _flow_customise
+from .custom_flow import customise as _flow_customise
 
 MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONSENT_MANAGERS_FILE = f"{MODULE_DIR}/assets/consent_managers.yml"
@@ -74,8 +76,11 @@ def get_extract_schema():
         "post_third_party_domains": "STRING",
         "post_tracking_domains": "STRING",
 
-        "consent_action": "STRING",   # 'accept' or 'reject'
+        "consent_action": "STRING",   # 'accept' or 'reject' or 'custom'
         "consent_result": "STRING",   # 'clicked', 'clicked-uncertain', 'error', ''
+        "custom_prefs_requested": "STRING",
+        "custom_toggles_changed": "STRING",
+        "custom_flow_debug": "STRING",
 
         "consent_manager": "STRING",
         "screenshot_files": "STRING",
@@ -134,8 +139,45 @@ async def click_consent_manager(page, action: str = "accept"):
     for cmp in consent_managers:
         parent = page
         target = None
+        flows = cmp.get("flows", {})
+        # Prefer flow-specific steps. fallback to "actions" for accept
+        steps = flows.get(action) or (cmp.get("actions", []) if action =="accept" else [])
 
-        for act in cmp.get("actions", []):
+        if action == "reject" and not steps and flows.get("manage"):
+            opened = False
+            for act in flows["manage"]:
+                t = act.get("type")
+                v = act.get("value")
+                if t == "iframe":
+                    try:
+                        await parent.locator(v).first.wait_for(state="attached", timeout=3000)
+                        parent = parent.frame_locator(v).first
+                    except Exception:
+                        parent = None
+                        break
+                elif t in ("css-selector", "css-selector-list"):
+                    sel_list = [v] if t == "css-selector" else v
+                    for sel in sel_list:
+                        loc = parent.locator(sel).first
+                        if await loc.count() > 0 and await _try_click(loc):
+                            opened = True
+                            try:
+                                await page.wait_for_load_state("networkidle", timeout=2000)
+                            except Exception: pass
+                            break
+                
+                if opened:
+                    break
+            if opened:
+                btn = page.get_by_role("button", name=REJECT_TEXT).first
+                if await btn.count() > 0 and await _try_click(btn):
+                    return {"id":"managed-reject","name":"Manage then Reject (inline)","status":"clicked","clicked_action":"reject"}
+                for sel in ("#onetrust-reject-all-handler",):
+                    loc = page.locator(sel).first
+                    if await loc.count() > 0 and await _try_click(loc):
+                        return {"id":"managed-reject","name":"Manage then Reject (selector)","status":"clicked","clicked_action":"reject"}
+                        
+        for act in steps:
             t = act.get("type")
             v = act.get("value")
 
@@ -156,7 +198,7 @@ async def click_consent_manager(page, action: str = "accept"):
                     elif action == "accept":
                         # For accept we allow falling back to the provided selector (often the Accept CTA)
                         target = loc
-                    # For reject we require a text match; otherwise keep searching
+                    # Need text match for reject, keep searching otherwise
                 if target is not None:
                     break
 
@@ -218,11 +260,39 @@ async def click_consent_manager(page, action: str = "accept"):
     # Fallback: open "Manage/Preferences", then try Reject again
     if action == "reject":
         try:
-            # Try common OneTrust open-preferences first (fast path)
-            open_candidates = [
-                "#onetrust-pc-btn-handler",          # OneTrust "Preferences" button
-            ]
+            # common OneTrust open-preferences first (fast path)
+            # open_candidates = [
+            #     "#onetrust-pc-btn-handler",          # OneTrust "Preferences" button
+            # ]
+            manage_steps = []
+            for cmp in consent_managers:
+                if cmp.get("flows", {}).get("manage"):
+                    manage_steps = cmp["flows"]["manage"]; break
+            # Or esle try common selectors
             opened = False
+            for act in manage_steps or []:
+                parent = page
+                t = act.get("type")
+                v = act.get("value")
+                if t == "iframe":
+                    try:
+                        await parent.locator(v).first.wait_for(state="attached", timeout=3000)
+                        parent = parent.frame_locator(v).first
+                    except Exception:
+                        continue
+                elif t in ("css-selector", "css-selector-list"):
+                    sel_list = [v] if t == "css-selector" else v
+                    for sel in sel_list:
+                        loc = parent.locator(sel).first
+                        if await loc.count() > 0 and await _try_click(loc):
+                            opened = True
+                            break
+                if opened:
+                    break
+            
+            # Try common OneTrust fast path
+            open_candidates = ["#onetrust-pc-btn-handler"]
+            
             for sel in open_candidates:
                 loc = page.locator(sel).first
                 if await loc.count() > 0:
@@ -230,14 +300,13 @@ async def click_consent_manager(page, action: str = "accept"):
                         opened = True
                         break
 
-            # If not opened yet, try generic text-based manage button
+            # If still not opened yet, try generic text-based manage button
             if not opened:
                 btn = page.get_by_role("button", name=MANAGE_TEXT).first
                 if await btn.count() > 0:
                     opened = await _try_click(btn)
 
             if opened:
-                # Small settle wait
                 try:
                     await page.wait_for_load_state("networkidle", timeout=2000)
                 except Exception:
@@ -245,9 +314,8 @@ async def click_consent_manager(page, action: str = "accept"):
 
                 # Try Reject again (often visible in the preferences modal)
                 reject_locators = [
-                    "#onetrust-reject-all-handler",     # OneTrust Reject (modal)
+                    "#onetrust-reject-all-handler",
                 ]
-                # Prefer text match if available
                 btn = page.get_by_role("button", name=REJECT_TEXT).first
                 if await btn.count() > 0 and await _try_click(btn):
                     return {"id":"fallback-manage-text","name":"Manage then Reject (text)","status":"clicked","clicked_action":"reject"}
@@ -304,7 +372,8 @@ async def crawl_url(
     screenshot=True,
     device=None,
     wait_for_timeout=5000,
-    consent_action: str = "accept",
+    consent_action: str = "accept-all",
+    custom_prefs = None,
 ):
     """
     Open a new browser context with a URL and extract data about cookies and
@@ -378,10 +447,13 @@ async def crawl_url(
         # base64_url = base64.urlsafe_b64encode(
         #     output["domain_name"].encode("ascii")
         # ).decode("ascii")
-        id_source = landed_host.encode("idna").decode("ascii")
+        # id_source = landed_host.encode("idna").decode("ascii")
 
-        output["id"] = base64.urlsafe_b64encode(id_source.encode("ascii")).decode("ascii")
+        # output["id"] = base64.urlsafe_b64encode(id_source.encode("ascii")).decode("ascii")
+        # run_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
         run_tag = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        id_source = f"{landed_host}|{run_tag}|{consent_action}".encode("idna").decode("ascii")
+        output["id"] = base64.urlsafe_b64encode(id_source.encode("ascii")).decode("ascii")
 
         logging.info(f"Extracting data from domain {output['domain_name']}")
 
@@ -462,11 +534,11 @@ async def crawl_url(
                 "secure": bool(c.get("secure")),
                 "httpOnly": bool(c.get("httpOnly")),
                 "sameSite": c.get("sameSite"),
-                "expires": int(c.get("expires", 0)),
-                "session": int(c.get("expires", 0) or 0) <= 0,
+                "expires": int(c.get("expires" or 0)),
+                "session": int(c.get("expires") or 0) <= 0,
                 "expires_days": (
-                    (date.fromtimestamp(int(c["expires"])) - date.today()).days
-                    if int(c.get("expires", 0)) > 0 else None
+                    (date.fromtimestamp(int(c.get("expires") or 0)) - date.today()).days
+                    if int(c.get("expires") or 0) > 0 else None
                 ),
             }
             for c in cookies
@@ -474,9 +546,21 @@ async def crawl_url(
         output["pre_cookies"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
 
         pre_len = len(req_urls)
-        output["consent_action"] = consent_action  # 'reject' for this phase
+        output["consent_action"] = consent_action
         logging.debug(f"Trying to {consent_action} on {output['domain_name']}")
-        cmp = await click_consent_manager(page, action=consent_action)
+        # Map action
+        if consent_action in ("accept", "reject"):
+            cmp = await click_consent_manager(page, action=consent_action)
+        elif consent_action =="custom":
+            output["custom_prefs_requested"] = custom_prefs or {}
+            cmp = await _flow_customise(page, custom_prefs or {}, managers=get_consent_managers())
+            output["custom_toggles_changed"] = cmp.get("changes")
+            output["custom_flow_debug"] = {
+                "manage_opened": cmp.get("manage_opened"),
+                "saved": cmp.get("saved")
+            }
+        else:
+            cmp = await click_consent_manager(page, action="accept")
         output["consent_manager"] = cmp
         output["consent_result"] = cmp.get("status", "")
 
@@ -550,10 +634,10 @@ async def crawl_url(
                 "secure": bool(c.get("secure")),
                 "httpOnly": bool(c.get("httpOnly")),
                 "sameSite": c.get("sameSite"),
-                "expires": int(c.get("expires", 0)),
-                "session": int(c.get("expires", 0) or 0) <= 0,
+                "expires": int(c.get("expires") or 0),
+                "session": int(c.get("expires") or 0) <= 0,
                 "expires_days": (
-                    (date.fromtimestamp(int(c["expires"])) - date.today()).days
+                    (date.fromtimestamp(int(c.get("expires") or 0)) - date.today()).days
                     if int(c.get("expires", 0) or 0) > 0 else None
                 ),
             }
@@ -585,7 +669,8 @@ async def crawl_batch(
     tracking_domains_list=None,
     browser_config=None,
     screenshot=False,
-    flow="reject-all",
+    flow="accept-all",
+    custom_prefs=None,
     **kwargs,
 ):
     """
@@ -602,13 +687,22 @@ async def crawl_batch(
         browser = await p.chromium.launch(**browser_config)
 
         for urls_batch in utils.batch(urls, batch_size):
+            def _map_flow_to_action(f):
+                if f == "accept-all":
+                    return "accept"
+                if f == "reject-all":
+                    return "reject"
+                if f == "custom":
+                    return "custom"
+                return "reject"
             data = [
                 crawl_url(
                     url=url,
                     browser=browser,
                     tracking_domains_list=tracking_domains_list,
                     screenshot=screenshot,
-                    consent_action=("accept" if flow == "accept-all" else "reject"),
+                    consent_action=_map_flow_to_action(flow),
+                    custom_prefs=custom_prefs,
                 )
                 for url in urls_batch
             ]

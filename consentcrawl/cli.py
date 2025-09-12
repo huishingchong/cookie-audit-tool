@@ -14,7 +14,8 @@ async def process_urls(
     headless=True,
     screenshot=True,
     results_db_file="crawl_results.db",
-    flow="accept-all"
+    flow="accept-all",
+    custom_prefs=None,
 ):
     """
     Start the Playwright browser, run the URLs to test in batches asynchronously
@@ -30,6 +31,7 @@ async def process_urls(
         results_db_file=results_db_file,
         screenshot=screenshot,
         flow=flow,
+        custom_prefs=custom_prefs
     )
 
 
@@ -86,8 +88,12 @@ def cli():
     parser.add_argument(
         "--flow",
         default="accept-all",
-        choices=["accept-all", "reject-all"],
+        choices=["accept-all", "reject-all", "custom"],
         help="Consent path to run per URL (default: accept-all)",
+    )
+    parser.add_argument(
+        "--categories",
+        help="Only for --flow custom e.g. analytics=off,advertising=off,functional=on"
     )
 
     args = parser.parse_args()
@@ -149,8 +155,22 @@ def cli():
         source_file=args.blocklists,
         force_bootstrap=args.bootstrap,
     )
+    def _parse_categories(s):
+        if not s:
+            return None
+        out = {}
+        for pair in s.split(","):
+            if "=" not in pair:
+                continue
+            k, v = pair.split("=", 1)
+            out[k.strip().lower()] = v.strip().lower() in ("1", "true", "on", "yes")
+        return out
+    
+    parsed_categories = _parse_categories(args.categories)
 
     results = asyncio.run(
+        # Parse custom categories
+
         process_urls(
             urls=urls,
             batch_size=args.batch_size,
@@ -159,6 +179,7 @@ def cli():
             screenshot=args.screenshot,
             results_db_file=args.db_file,
             flow=args.flow,
+            custom_prefs=parsed_categories,
         )
     )
 
@@ -166,3 +187,6 @@ def cli():
         sys.stdout.write(json.dumps(results, indent=2))
 
     sys.exit(0)
+
+if __name__ == "__main__":
+    cli()
