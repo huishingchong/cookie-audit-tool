@@ -26,7 +26,7 @@ DEFAULT_UA_STRINGS = [
 ACCEPT_TEXT = re.compile(
     r"\b("
     r"accept|agree|allow|consent|ok|got it|"
-    r"akzeptieren|zustimmen|alle akzeptieren|"
+    r"akzeptieren|zustimmen|alle akzeptieren|alle zulassen|"
     r"accepter|tout accepter|"
     r"aceptar|acepto|aceptar todo|aceptar todas|"
     r"accetta|accetto|accetta tutto|"
@@ -42,7 +42,7 @@ ACCEPT_TEXT = re.compile(
 REJECT_TEXT = re.compile(
     r"\b("
     r"reject|deny|decline|disagree|continue without|"
-    r"alles ablehnen|ich lehne ab|"
+    r"alles ablehnen|ich lehne ab|alle ablehnen"
     r"tout refuser|refuser|"
     r"rechazar|"
     r"rifiuto|"
@@ -242,6 +242,31 @@ async def click_consent_manager(page, action: str = "accept"):
             cmp["clicked_action"] = action
             return cmp
 
+    # OneTrust fast path for ACCEPT
+    if action == "accept":
+        for sel in ("#onetrust-accept-btn-handler", "#accept-recommended-btn-handler"):
+            try:
+                loc = page.locator(sel).first
+                if await loc.count() > 0 and await _try_click(loc):
+                    try:
+                        await page.wait_for_load_state("networkidle", timeout=3000)
+                    except PlaywrightTimeoutError:
+                        pass
+                    # If the button is gone, we’re confident
+                    try:
+                        still_visible = await loc.is_visible()
+                    except Exception:
+                        still_visible = False
+                    return {
+                        "id": "ot-accept",
+                        "name": "OneTrust Accept",
+                        "status": "clicked" if not still_visible else "clicked-uncertain",
+                        "clicked_action": "accept",
+                        "selector": sel,
+                    }
+            except Exception:
+                pass
+
     # FALLBACK: text search on page, then frames
     btn = page.get_by_role("button", name=text_pattern).first
     if await btn.count() > 0 and await btn.is_visible():
@@ -312,7 +337,7 @@ async def click_consent_manager(page, action: str = "accept"):
                 except Exception:
                     pass
 
-                # Try Reject again (often visible in the preferences modal)
+                # Try Reject again
                 reject_locators = [
                     "#onetrust-reject-all-handler",
                 ]
@@ -320,11 +345,10 @@ async def click_consent_manager(page, action: str = "accept"):
                 if await btn.count() > 0 and await _try_click(btn):
                     return {"id":"fallback-manage-text","name":"Manage then Reject (text)","status":"clicked","clicked_action":"reject"}
 
-                # Otherwise try common selector(s)
                 for sel in reject_locators:
                     loc = page.locator(sel).first
                     if await loc.count() > 0 and await _try_click(loc):
-                        return {"id":"fallback-manage-sel","name":"Manage then Reject (selector)","status":"clicked","clicked_action":"reject"}
+                        return {"id":"fallback-reject-handler","name":"Manage then Reject (selector)","status":"clicked","clicked_action":"reject"}
         except Exception:
             pass
 
@@ -534,7 +558,7 @@ async def crawl_url(
                 "secure": bool(c.get("secure")),
                 "httpOnly": bool(c.get("httpOnly")),
                 "sameSite": c.get("sameSite"),
-                "expires": int(c.get("expires" or 0)),
+                "expires": int(c.get("expires") or 0),
                 "session": int(c.get("expires") or 0) <= 0,
                 "expires_days": (
                     (date.fromtimestamp(int(c.get("expires") or 0)) - date.today()).days
@@ -554,10 +578,18 @@ async def crawl_url(
         elif consent_action =="custom":
             output["custom_prefs_requested"] = custom_prefs or {}
             cmp = await _flow_customise(page, custom_prefs or {}, managers=get_consent_managers())
-            output["custom_toggles_changed"] = cmp.get("changes")
+            output["custom_toggles_changed"] = str(cmp.get("changes"))
             output["custom_flow_debug"] = {
                 "manage_opened": cmp.get("manage_opened"),
-                "saved": cmp.get("saved")
+                "manage_via": cmp.get("manage_via"),
+                "manage_role": cmp.get("manage_role"),
+                "manage_frame": cmp.get("manage_frame"),
+                "save_via": cmp.get("save_via"),
+                "save_role": cmp.get("save_role"),
+                "save_frame": cmp.get("save_frame"),
+                "saved": cmp.get("saved"),
+                "applied_prefs": cmp.get("applied_prefs"),
+                "category_hits": cmp.get("category_hits"),
             }
         else:
             cmp = await click_consent_manager(page, action="accept")
