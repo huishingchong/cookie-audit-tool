@@ -481,7 +481,7 @@ async def crawl_url(
 
         logging.info(f"Extracting data from domain {output['domain_name']}")
 
-        await page.wait_for_timeout(2000)
+        await page.wait_for_timeout(10000)
         await page.mouse.move(543, 123)
         await page.mouse.wheel(0, -123)
         await page.wait_for_timeout(
@@ -501,31 +501,6 @@ async def crawl_url(
         logging.debug(f"Retrieving JSON-LD and meta tags on {output['domain_name']}")
         output["json_ld"] = await get_jsonld(page)
         output["meta_tags"] = await get_meta_tags(page)
-
-        # # Capture data pre-consent
-        # thirdparty_requests = list(
-        #     filter(lambda req_url: not output["domain_name"] in req_url, req_urls)
-        # )
-        # output["third_party_domains_no_consent"] = list(
-        #     set(
-        #         map(
-        #             lambda r: re.search("https?://(?:www.)?([^\/]+\.[^\/]+)", r).group(
-        #                 1
-        #             ),
-        #             thirdparty_requests,
-        #         )
-        #     )
-        # )
-        # output["tracking_domains_no_consent"] = list(
-        #     set(
-        #         [
-        #             re.search("[^\.]+\.[a-z]+$", d).group(0)
-        #             for d in output["third_party_domains_no_consent"]
-        #             if d in tracking_domains_list
-        #         ]
-        #     )
-        # )
-        # cookies = await browser_context.cookies()
         
         thirdparty_requests_pre = [r for r in req_urls if is_third_party(r, page.url)]
 
@@ -541,8 +516,6 @@ async def crawl_url(
             if is_blocklisted_host(host_from_url(r), tracking_set)
         })
 
-
-        # cookies = await browser_context.cookies([url])
 
         # Collect all cookies, then keep only those for this site (by registrable domain)
         current_host = host_from_url(page.url) or host_from_url(url)
@@ -572,7 +545,8 @@ async def crawl_url(
         pre_len = len(req_urls)
         output["consent_action"] = consent_action
         logging.debug(f"Trying to {consent_action} on {output['domain_name']}")
-        # Map action
+
+        # Map action to flow
         if consent_action in ("accept", "reject"):
             cmp = await click_consent_manager(page, action=consent_action)
         elif consent_action =="custom":
@@ -596,10 +570,6 @@ async def crawl_url(
         output["consent_manager"] = cmp
         output["consent_result"] = cmp.get("status", "")
 
-        # if screenshot and output["consent_manager"].get("status", "") not in [
-        #     "error",
-        #     "",
-        # ]:
         if screenshot and output.get("consent_result") in ("clicked", "clicked-uncertain"):
             try:
                 path_post = f'./screenshots/screenshot_{output["id"]}_{run_tag}_after_{consent_action}.png'
@@ -608,38 +578,11 @@ async def crawl_url(
             except Exception as e:
                 logging.debug(f"Post-consent screenshot failed: {e}")
 
-
-        # thirdparty_requests = list(
-        #     filter(lambda req_url: not output["domain_name"] in req_url, req_urls)
-        # )
-        # output["third_party_domains_all"] = list(
-        #     set(
-        #         map(
-        #             lambda r: re.search("https?://(?:www.)?([^\/]+\.[^\/]+)", r).group(
-        #                 1
-        #             ),
-        #             thirdparty_requests,
-        #         )
-        #     )
-        # )
-        # output["tracking_domains_all"] = list(
-        #     set(
-        #         [
-        #             re.search("[^\.]+\.[a-z]+$", d).group(0)
-        #             for d in output["third_party_domains_all"]
-        #             if d in tracking_domains_list
-        #         ]
-        #     )
-        # )
-
         try:
-            await page.wait_for_load_state("networkidle", timeout=5000)
+            await page.wait_for_load_state("networkidle", timeout=10000)
         except PlaywrightTimeoutError:
             pass
         await page.wait_for_timeout(wait_for_timeout)
-        # thirdparty_requests_all = [
-        #     r for r in req_urls if is_third_party(r, url)
-        # ]
 
         thirdparty_requests_post = [r for r in req_urls[pre_len:] if is_third_party(r, page.url)]
         output["post_third_party_domains"] = sorted({
