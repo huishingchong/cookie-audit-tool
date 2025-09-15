@@ -158,30 +158,56 @@ def cli():
     def _parse_categories(s):
         if not s:
             return None
+        allowed = {"analytics", "functional", "advertising"}
+        aliases = {
+            "marketing": "advertising",
+            "ads": "advertising",
+            "advertisement": "advertising",
+        }
+        truthy = {"1", "true", "on", "yes"}
+        falsy  = {"0", "false", "off", "no"}
         out = {}
-        for pair in s.split(","):
-            if "=" not in pair:
+        for raw in s.split(","):
+            pair = raw.strip()
+            if not pair:
                 continue
+            if "=" not in pair:
+                raise ValueError(f"Invalid pair '{pair}'. Use key=value.")
             k, v = pair.split("=", 1)
-            out[k.strip().lower()] = v.strip().lower() in ("1", "true", "on", "yes")
+            key = aliases.get(k.strip().lower(), k.strip().lower())
+            val = v.strip().lower()
+            if key not in allowed:
+                raise ValueError(f"Unknown category '{key}'. Allowed: {sorted(allowed)}")
+            if val in truthy:
+                out[key] = True
+            elif val in falsy:
+                out[key] = False
+            else:
+                raise ValueError(f"Invalid value '{val}' for {key}. Use on/off/true/false/yes/no/1/0")
         return out
-    
-    parsed_categories = _parse_categories(args.categories)
 
-    results = asyncio.run(
-        # Parse custom categories
+    try:
+        parsed_categories = _parse_categories(args.categories)
+    except ValueError as e:
+        parser.error(str(e))
 
-        process_urls(
-            urls=urls,
-            batch_size=args.batch_size,
-            tracking_domains_list=blockers.get_domains(),
-            headless=args.headless,
-            screenshot=args.screenshot,
-            results_db_file=args.db_file,
-            flow=args.flow,
-            custom_prefs=parsed_categories,
-        )
-    )
+    # Enforce correct pairing of flags
+    if args.flow == "custom" and not parsed_categories:
+        parser.error("--categories is required when --flow custom "
+                     "(e.g., --categories 'analytics=off,advertising=off,functional=on')")
+    if parsed_categories and args.flow != "custom":
+        parser.error("--categories can only be used with --flow custom")
+
+    results = asyncio.run(process_urls(
+        urls=urls,
+        batch_size=args.batch_size,
+        tracking_domains_list=blockers.get_domains(),
+        headless=args.headless,
+        screenshot=args.screenshot,
+        results_db_file=args.db_file,
+        flow=args.flow,
+        custom_prefs=parsed_categories,
+    ))
 
     if args.show_output and len(results) < 25:
         sys.stdout.write(json.dumps(results, indent=2))
