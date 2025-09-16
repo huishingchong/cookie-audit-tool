@@ -20,7 +20,14 @@ MODULE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONSENT_MANAGERS_FILE = f"{MODULE_DIR}/assets/consent_managers.yml"
 
 DEFAULT_UA_STRINGS = [
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36 Edg/116.0.1938.81"
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5_2) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.0.0 Safari/537.36 Edg/116.0.1938.81",
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.92 Safari/537.36"
+]
+BROWSER_TYPE = "chrome"
+common_args = [
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            "--disable-backgrounding-occluded-windows",
 ]
 
 ACCEPT_TEXT = re.compile(
@@ -130,7 +137,7 @@ async def _try_click(locator):
 async def click_consent_manager(page, action: str = "accept"):
     """
     action: 'accept' | 'reject'
-    Try known CMPs for given action; if not found, fall back to text search.
+    Try known CMPs for given action. If not found, fall back to text search.
     Returns a dict with 'status' when click likely happened.
     """
     consent_managers = get_consent_managers()
@@ -285,14 +292,11 @@ async def click_consent_manager(page, action: str = "accept"):
     # Fallback: open "Manage/Preferences", then try Reject again
     if action == "reject":
         try:
-            # common OneTrust open-preferences first (fast path)
-            # open_candidates = [
-            #     "#onetrust-pc-btn-handler",          # OneTrust "Preferences" button
-            # ]
             manage_steps = []
             for cmp in consent_managers:
                 if cmp.get("flows", {}).get("manage"):
-                    manage_steps = cmp["flows"]["manage"]; break
+                    manage_steps = cmp["flows"]["manage"]
+                    break
             # Or esle try common selectors
             opened = False
             for act in manage_steps or []:
@@ -435,10 +439,23 @@ async def crawl_url(
             tracking_domains_list = []
 
         if "user_agent" not in device:
-            device["user_agent"] = random.choice(DEFAULT_UA_STRINGS)
+            # device["user_agent"] = random.choice(DEFAULT_UA_STRINGS)
+            if BROWSER_TYPE == "msedge":
+                device["user_agent"] = DEFAULT_UA_STRINGS[0]
+            else:
+                device["user_agent"] = DEFAULT_UA_STRINGS[1]
+        logging.info("UA=%s", device.get("user_agent"))
 
         if "viewport" not in device:
             device["viewport"] = {"width": 1366, "height": 768}
+        if "locale" not in device:
+            device["locale"] = "en-GB"
+        if "timezone_id" not in device:
+            device["timezone_id"] = "Europe/London"
+        if "color_scheme" not in device:
+            device["color_scheme"] = "light"
+        if "is_mobile" not in device:
+            device["is_mobile"] = False
 
         browser_context = await browser.new_context(
             **device,
@@ -501,6 +518,15 @@ async def crawl_url(
         logging.debug(f"Retrieving JSON-LD and meta tags on {output['domain_name']}")
         output["json_ld"] = await get_jsonld(page)
         output["meta_tags"] = await get_meta_tags(page)
+
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except PlaywrightTimeoutError:
+            pass
+        try:
+            await page.wait_for_load_state("networkidle", timeout=10000)
+        except PlaywrightTimeoutError:
+            pass
         
         thirdparty_requests_pre = [r for r in req_urls if is_third_party(r, page.url)]
 
@@ -540,7 +566,8 @@ async def crawl_url(
             }
             for c in cookies
         ]
-        output["pre_cookies"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
+        # output["pre_cookies"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
+        output["pre_cookies"].sort(key=lambda c: c.get("name") or "")
 
         pre_len = len(req_urls)
         output["consent_action"] = consent_action
@@ -618,7 +645,8 @@ async def crawl_url(
             }
             for c in cookies
         ]
-        output["post_cookies"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
+        # output["post_cookies"].sort(key=lambda c: ((c.get("name") or ""), (c.get("domain") or "")))
+        output["post_cookies"].sort(key=lambda c: c.get("name") or "")
 
         await browser_context.close()
 
@@ -652,14 +680,31 @@ async def crawl_batch(
     Run the crawler for multiple URLs in batches and apply a (async) function
     to the results. Additional arguments can be passed to the results function.
     """
+    browser = 'chrome'
     if tracking_domains_list is None:
         tracking_domains_list = []
+    
     if not browser_config:
-        browser_config = {"headless": True, "channel": "msedge"}
+        if BROWSER_TYPE == 'msedge':
+            browser_config = {"headless": True, "channel": "msedge", "args": common_args}
+        else:
+            browser_config = {"headless": True, "channel": "chrome", "args": common_args}
 
     async with async_playwright() as p:
         logging.debug("Starting browser")
-        browser = await p.chromium.launch(**browser_config)
+        # browser = await p.chromium.launch(**browser_config)
+        try:
+            browser = await p.chromium.launch(**browser_config)
+            logging.info("Launched browser via channel=%s", browser_config.get("channel"))
+        except Exception as e:
+            if browser_config.get("channel"):
+                logging.warning("Failed to launch channel=%s (%s). Falling back to bundled Chromium.",
+                                browser_config.get("channel"), e)
+                fallback_cfg = dict(browser_config)
+                fallback_cfg.pop("channel", None)
+                browser = await p.chromium.launch(**fallback_cfg)
+            else:
+                raise
 
         for urls_batch in utils.batch(urls, batch_size):
             def _map_flow_to_action(f):
@@ -699,7 +744,11 @@ async def crawl_single(url, tracking_domains_list=None, browser_config=None):
     if tracking_domains_list is None:
         tracking_domains_list = []
     if not browser_config:
-        browser_config = {"headless": True, "channel": "msedge"}
+        if BROWSER_TYPE == 'msedge':
+            browser_config = {"headless": True, "channel": "msedge", "args": common_args}
+        else:
+            browser_config = {"headless": True, "channel": "chrome", "args": common_args}
+
 
     async with async_playwright() as p:
         logging.debug("Starting browser")

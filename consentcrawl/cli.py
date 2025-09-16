@@ -65,7 +65,7 @@ def cli():
     parser.add_argument(
         "--batch_size",
         "-b",
-        default=15,
+        default=10,
         type=int,
         help="Number of URLs (and browser windows) to run in each batch. Default: 15, increase or decrease depending on your system capacity.",
     )

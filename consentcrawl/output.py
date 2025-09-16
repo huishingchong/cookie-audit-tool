@@ -1,4 +1,4 @@
-# Write a tailored script for thurs.db's schema and run a quick demo on the uploaded DB.
+# Output txt file from consentcrawl db schema
 #!/usr/bin/env python3
 
 import argparse
