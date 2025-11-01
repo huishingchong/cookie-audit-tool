@@ -106,6 +106,24 @@ def cookie_name_list(cookies: List[Dict[str, Any]]) -> List[str]:
             unique_ordered.append(n)
     return unique_ordered
 
+def cookie_name_instances(cookies: List[Dict[str, Any]]) -> List[str]:
+    """
+    Return one display line per cookie. If same cookie name but different domain, output the domain name
+    """
+    lines: List[str] = []
+    for d in cookies:
+        nm = d.get("name")
+        if nm is None:
+            continue
+        dom = (d.get("domain") or "").lstrip(".")
+        path = d.get("path") or "/"
+        # lines.append(f"{nm} ({dom}{path})" if dom or path else str(nm))
+        if nm not in lines:
+            lines.append(nm)
+        else:
+            lines.append(f"{nm} ({dom}{path})" if dom or path else str(nm))
+    return lines
+
 
 ATTR_ORDER = [
     "domain", "path", "secure", "httpOnly", "sameSite", "expires", "expires_days", "session", "size", "priority"
@@ -231,8 +249,10 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                 pre = info["pre"]
                 post = info["post"]
 
-                pre_names = cookie_name_list(pre)
-                post_names = cookie_name_list(post)
+                # pre_names = cookie_name_list(pre)
+                # post_names = cookie_name_list(post)
+                pre_names = cookie_name_instances(pre)
+                post_names = cookie_name_instances(post)
 
                 # Names lists (unchanged)
                 lines.append("pre_cookies — names:")
