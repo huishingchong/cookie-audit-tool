@@ -131,6 +131,8 @@ The examples folder shows examples to run ConsentCrawl:
 - as a Github Action
 - on Google Cloud Run with a simple FastAPI server that responds with the ConsentCrawl results on a POST request to a `/consentcrawl` endpoint.
 
+```python3 -m consentcrawl  targets.txt --batch_size 3 -o --debug --db_file targets_reject_all.db --flow reject-all```
+
 ## To Do
 - [ ] Follow redirects on URLs
 - [ ] Detect consent managers with cookies instead of just CSS selectors
