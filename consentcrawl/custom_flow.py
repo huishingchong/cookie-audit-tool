@@ -45,7 +45,7 @@ _MANAGE_TERMS = [
     "optionen verwalten","auswahl anpassen",
 ]
 _SAVE_TERMS = [
-    "save","confirm","confirm choices","save and exit","confirm and continue","apply","allow selection",
+    "save","confirm","confirm choices","save and exit","confirm and continue","apply","allow selection","submit","save preferences","save choices","done",
     # DE
     "speichern","bestätigen","anwenden","auswahl bestätigen",
     # FR
@@ -103,7 +103,7 @@ _CATEGORY_SYNONYMS = {
     ],
     "advertising": [
         r"advertis(?:ing|e?ments?)", r"ads?", r"marketing",
-        r"personal(?:iz|is)ation", r"profil(?:ing|e)", r"target(?:ed|ing)",
+        r"profil(?:ing|e)", r"target(?:ed|ing)",
         r"remarket(?:ing)?", r"retarget(?:ing)?",
         r"publicit", r"ciblage",                                  # FR
         r"werb(?:ung)?|anzeigen|personalisier|zielgrupp",          # DE
@@ -123,7 +123,7 @@ _CATEGORY_SYNONYMS = {
         r"oglašav", r"oglasi", r"personalizac", r"ciljan", r"retarget", r"remarket",  # HR
     ],
     "functional": [
-        r"functional", r"preferences", r"performance", r"experience",
+        r"functional", r"performance", r"experience",r"personal(?:iz|is)ation",
         r"fonctionnel|préférences|perform",                        # FR
         r"funktion|präferenz|leistung|erfahr",                     # DE
         r"funcional|preferenc|rendim|experien",                    # ES/PT/RO
@@ -360,6 +360,11 @@ async def _set_category(page, label_regexes, want_on: bool):
                 if await _safe_click(btn):
                     return True, {"pattern": patt, "role": "button", "state_before": pressed}
             last_info = {"pattern": patt, "role": "button", "state_before": pressed}
+        # 4) fallback: click label containing the text if it wraps an input
+        lab = page.locator("label").filter(has_text=rx).first
+        if await lab.count() > 0:
+            if await _safe_click(lab):
+                return True, {"pattern": patt, "role": "label", "state_before": None}
     return False, (last_info or {"pattern": None, "role": None, "state_before": None})
 
 
