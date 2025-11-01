@@ -1,0 +1,260 @@
+rules:
+- id: R001_GA
+  name_re: ^_ga($|_.*)
+  domain_re: .*
+  category: analytics
+  vendor: google_analytics
+
+- id: R002_GID
+  name_re: ^_gid$
+  domain_re: .*
+  category: analytics
+  vendor: google_analytics
+
+- id: R003_GAT
+  name_re: ^_gat($|_.*)
+  domain_re: .*
+  category: analytics
+  vendor: google_analytics
+
+- id: R004_GCL
+  name_re: ^_gcl_au$
+  domain_re: .*
+  category: advertising
+  vendor: google_ads
+
+- id: R005_GTM
+  name_re: ^_dc_gtm($|_.*)
+  domain_re: .*
+  category: analytics
+  vendor: google_analytics
+
+- id: R010_FBP
+  name_re: ^_fbp$
+  domain_re: .*
+  category: advertising
+  vendor: facebook
+  
+- id: R011_FR
+  name_re: ^fr$
+  domain_re: ^(.*\.)?facebook\.com$
+  category: advertising
+  vendor: facebook
+
+- id: R020_IDE
+  name_re: ^IDE$
+  domain_re: ^(.*\.)?doubleclick\.net$
+  category: advertising
+  vendor: google_ads
+
+- id: R030_CLOUDFLARE_BM
+  name_re: ^__cf_bm$
+  domain_re: .*
+  category: necessary
+  vendor: cloudflare
+
+- id: R040_ONETRUST_CONSENT
+  name_re: ^(OptanonConsent|OptanonAlertBoxClosed)$
+  domain_re: .*
+  category: necessary
+  vendor: onetrust
+
+- id: R041_TCF_STRING
+  name_re: ^(euconsent-v2|IABTCF_TCString)$
+  domain_re: .*
+  category: necessary
+  vendor: iab_tcf
+
+- id: R050_HOTJAR
+  name_re: ^_hj.*
+  domain_re: .*
+  category: analytics
+  vendor: hotjar
+
+- id: R060_CLARITY
+  name_re: ^_cl(ck|sk|tk)$|^CLID$
+  domain_re: .*
+  category: analytics
+  vendor: ms_clarity
+
+- id: R070_TIKTOK_CSID
+  name_re: ^_?ttcsid($|_.*)
+  category: advertising
+  vendor: tiktok
+
+- id: R071_TIKTOK_ENABLE
+  name_re: ^_?tt_enable_cookie($|_.*)
+  category: advertising
+  vendor: tiktok
+
+- id: R071_TIKTOK_CID
+  name_re: ^_?ttcid($|_.*)
+  category: advertising
+  vendor: tiktok
+
+- id: R100_ABCK
+  name_re: ^_abck$
+  domain_re: .*
+  category: necessary
+  vendor: akamai
+
+- id: R101_AK_BMSC
+  name_re: ^ak_bmsc$
+  domain_re: .*
+  category: functional
+  vendor: akamai
+
+- id: R102_BM_SV
+  name_re: ^bm_sv$
+  domain_re: .*
+  category: functional
+  vendor: akamai
+
+- id: R103_BM_SZ
+  name_re: ^bm_sz$
+  domain_re: .*
+  category: functional
+  vendor: akamai
+
+- id: R110_F5_TS
+  name_re: ^TS[0-9A-Fa-f]{6,}$
+  domain_re: .*
+  category: functional
+  vendor: f5
+
+- id: R900_NEXTAUTH_SESSION
+  name_re: ^(next-auth\.session-token|__Secure-next-auth\.session-token|__Host-next-auth\.csrf-token|__Secure-authjs\.callback-url|__Host-authjs\.csrf-token)$
+  domain_re: .*
+  category: necessary
+  vendor: authjs
+
+- id: R901_CSRF_TOKENS
+  name_re: ^(csrftoken|XSRF-TOKEN|_csrf)$
+  domain_re: .*
+  category: necessary
+  vendor: site
+
+- id: R902_SESSIONS_COMMON
+  name_re: ^(PHPSESSID|JSESSIONID|ASP\.NET_SessionId|connect\.sid|laravel_session|sessionid)$
+  domain_re: .*
+  category: necessary
+  vendor: site
+
+- id: R903_SECURE_HOST_SESSIONS
+  name_re: ^__(Secure|Host)-(session|sid|auth.*)$
+  domain_re: .*
+  category: necessary
+  vendor: site
+
+- id: R904_WP_LOGIN
+  name_re: ^wp_logged_in_.*$
+  domain_re: .*
+  category: necessary
+  vendor: wordpress
+
+- id: R905_NODE_SESSION
+  name_re: ^(sails\.sid|koa\.sid)$
+  domain_re: .*
+  category: necessary
+  vendor: site
+
+- id: R906_IDP_SESSIONS
+  name_re: ^(KC_RESTART|_legacy_auth0\.|auth0\.|cognitoidentityserviceprovider\..*session)$
+  domain_re: .*
+  category: necessary
+  vendor: idp
+
+- id: R944_ATTENTIVE
+  name_re: ^(__attentive_.*|_attn_)$
+  domain_re: .*
+  category: advertising
+  vendor: attentive
+
+- id: R900_FRAMEWORK_SESSIONS
+  name_re: ^(PHPSESSID|JSESSIONID|ASP\.NET_SessionId|connect\.sid|laravel_session|sessionid|ASPXANONYMOUS|.ASPXANONYMOUS|StateKey|\.DOTNETNUKE)$
+  domain_re: .*
+  category: necessary
+  vendor: site
+
+- id: R903_FRASERS_AUTHENTICATIONCOOKIE
+  name_re: ^[A-Za-z0-9-]*_authenticationcookie$
+  domain_re: .*
+  category: necessary
+  vendor: site
+
+- id: R904_AKAMAI_BOTMANAGER
+  name_re: ^(ak_bmsc|bm_sv|bm_sz|bm_mi|_abck)$
+  domain_re: .*
+  category: functional
+  vendor: akamai
+
+- id: R905_F5_TS
+  name_re: ^TS[0-9A-Fa-f]{6,}$
+  domain_re: .*
+  category: necessary
+  vendor: f5
+
+- id: R906_X_ORIGIN_INFRAT
+  name_re: ^(X-Origin-Cookie|x-origin-cookie|X-SD-URep|x-sd-urep|um_IsMobile|StateKey)$
+  domain_re: .*
+  category: necessary
+  vendor: site
+
+- id: R920_SITE_PREFS
+  name_re: ^(ChosenSite|ChosenSiteId|selectedlevel2menutabid|countryredirectcheckisdone|language|newsletterPoppedUp|acceptedCookies|AnonymousUserCurrency)$
+  domain_re: .*
+  category: functional
+  vendor: site
+
+- id: R940_SEGMENT
+  name_re: ^(ajs_.*|segment_anonymous_id)$
+  domain_re: .*
+  category: analytics
+  vendor: segment
+
+- id: R941_OPTIMIZELY
+  name_re: ^(optimizely.*|optimizelysession|optimizely_recommendations_session|optimizely_sitewide_recommenders_seen)$
+  domain_re: .*
+  category: analytics
+  vendor: optimizely
+
+- id: R942_PEERIUS
+  name_re: ^peerius_.*$
+  domain_re: .*
+  category: functional
+  vendor: peerius
+  
+- id: R943_SCARAB
+  name_re: ^scarab\.visitor$
+  domain_re: .*
+  category: functional
+  vendor: emarsys
+
+- id: R950_TIKTOK_TTP
+  name_re: ^_ttp$
+  category: advertising
+  vendor: TikTok
+  
+- id: R951_DOUBLECLICK_TEST
+  name_re: ^test_cookie$
+  domain_re: .*doubleclick\.net$
+  category: advertising
+  vendor: Google/DoubleClick
+
+- id: R952_FRASERS_ASPXANONYMOUS
+  name_re: ASPXANONYMOUS
+  domain_re: .*
+  category: necessary
+  vendor: site
+
+- id: R953_SELECTIKA
+  name_re: ^(__selectikatrack.*)$
+  domain_re: .*
+  category: analytics
+  vendor: selectika
+
+- id: x-hof-forced-environment-cookie-v7
+  name_re: x-hof-forced-environment-cookie-v7
+  domain_re: .*
+  category: functional
+  vendor: site
