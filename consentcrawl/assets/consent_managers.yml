@@ -4,6 +4,22 @@
   actions:
     - type: css-selector
       value: "#onetrust-accept-btn-handler"
+  flows:
+    manage:
+      - type: css-selector
+        value: "#onetrust-pc-btn-handler"
+    accept:
+      - type: css-selector-list
+        value: 
+        - "#accept-recommended-btn-handler"
+        - "#onetrust-accept-btn-handler"
+    reject:
+      - type: css-selector-list
+        value:
+          - "#onetrust-reject-all-handler"
+    save:
+      - type: css-selector
+        value: "#save-preference-btn-handler"
 
 - id: onetrust-enterprise
   name: OneTrust Enterprise
@@ -300,6 +316,14 @@
   actions:
     - type: css-selector
       value: "[fs-cc=allow]"
+  flows:
+    manage:
+      - type: css-selector
+        value: "[fs-cc=open-preferences]"
+    save:
+      - type: css-selector
+        value: "[fs-cc=submit]"
+
 
 - id: piwik-pro-gdpr-consent-manager
   name: Piwik PRO GDPR Consent Manager
@@ -308,12 +332,18 @@
     - type: css-selector
       value: "button#ppms_cm_agree-to-all"
 
+# --- Below ---
+# Added (not too sure if it does anything)
 - id: generic-custom
   name: Non Specific Implementation
   brand: Custom / Generic
   actions:
     - type: css-selector-list
-      value:
+      value: []
+  flows:
+    accept:
+      - type: css-selector-list
+        value:
         - "#AcceptCookiesButton, #acceptCookies, .cookie-accept, #cookie-accept"
         - "#acptBtn, #js-first-screen-accept-all-button, .consentAgree"
         - "button[class*='accept-all'], button[id*='accept-all'], button[class*='acceptall'], button[id*='acceptall'], a[class*='accept-all'], a[id*='accept-all'], a[class*='acceptall'], a[id*='acceptall']"
@@ -329,7 +359,20 @@
         - "#cookiebanner button, [class*='cookie']"
         - "[class*='ookie'] button, [id*='ookie'] button"
         - "[data-tracking-name*='opt-in'], [data-tracking-name*='optin'], [data-tracking-name*='optIn']"
-
+    reject:
+      - type: css-selector-list
+        value:
+          - "button:has-text('Reject'), a:has-text('Reject')"
+          - "[id*='reject'], [class*='reject'], [aria-label*='eject']"
+    manage:
+      - type: css-selector-list
+        value:
+          - "button:has-text('Manage'), button:has-text('Preferences')"
+          - "[id*='pref'], [class*='pref']"
+    save:
+      - type: css-selector-list
+        value:
+          - "button:has-text('Save'), button:has-text('Confirm choices'), button:has-text('Allow selection')"
 
 - id: non-specific-custom-with-iframe
   name: Non Specific Implementation with iFrame
@@ -354,3 +397,78 @@
         - "#cookiebanner button, [class*='cookie']"
         - "[class*='ookie'] button, [id*='ookie'] button"
         - "[data-tracking-name*='opt-in'], [data-tracking-name*='optin'], [data-tracking-name*='optIn']"
+
+- id: google-consent-eea
+  name: Google / YouTube EU Consent
+  brand: Google
+  flows:
+    # 1) Open the second layer (needed for custom flows and for sites that hide "Reject")
+    manage:
+      # Some variants render inside an iframe
+      - type: css-selector-list
+        value:
+          - "iframe[src*='consent.google.com']"
+          - "iframe[src*='consent.youtube.com']"
+          - "iframe[src*='privacysettings.google.com']"
+      # First-layer CTAs to reach the options panel
+      - type: css-selector-list
+        value:
+          - "button:has-text('More options')"
+          - "a:has-text('More options')"
+          - "button:has-text('Customize')"
+          - "a:has-text('Customize')"
+          - "button:has-text('Manage options')"
+          - "a:has-text('Manage options')"
+
+    # 2) Direct Accept on first layer (newer EEA banners) or classic "I agree"
+    accept:
+      - type: css-selector-list
+        value:
+          - "button:has-text('Accept all')"
+          - "a:has-text('Accept all')"
+          - "button:has-text('I agree')"
+          - "a:has-text('I agree')"
+
+    # 3) Direct Reject on first layer (newer EEA banners)
+    reject:
+      - type: css-selector-list
+        value:
+          - "button:has-text('Reject all')"
+          - "a:has-text('Reject all')"
+          - "button:has-text('Decline all')"
+          - "a:has-text('Decline all')"
+
+    # 4) Save/Confirm on the second layer after toggling categories (custom flow)
+    save:
+      - type: css-selector-list
+        value:
+          - "button:has-text('Confirm')"
+          - "a:has-text('Confirm')"
+          - "button:has-text('Save')"
+          - "a:has-text('Save')"
+          - "button:has-text('Save and exit')"
+          - "a:has-text('Save and exit')"
+          - "button:has-text('Confirm and continue')"
+          - "a:has-text('Confirm and continue')"
+
+- id: onetrust-generic
+  name: OneTrust (generic)
+  brand: OneTrust
+  flows:
+    manage:
+      - type: css-selector-list
+        value:
+          - "#onetrust-pc-btn-handler"
+    accept:
+      - type: css-selector-list
+        value:
+          - "#onetrust-accept-btn-handler"
+    reject:
+      - type: css-selector-list
+        value:
+          - "#onetrust-reject-all-handler"
+    save:
+      - type: css-selector-list
+        value:
+          - ".save-preference-btn-handler"
+          - "button:has-text('Confirm my choices')"

@@ -14,6 +14,8 @@ async def process_urls(
     headless=True,
     screenshot=True,
     results_db_file="crawl_results.db",
+    flow="accept-all",
+    custom_prefs=None,
 ):
     """
     Start the Playwright browser, run the URLs to test in batches asynchronously
@@ -28,6 +30,8 @@ async def process_urls(
         browser_config={"headless": headless, "channel": "chrome"},
         results_db_file=results_db_file,
         screenshot=screenshot,
+        flow=flow,
+        custom_prefs=custom_prefs
     )
 
 
@@ -61,7 +65,7 @@ def cli():
     parser.add_argument(
         "--batch_size",
         "-b",
-        default=15,
+        default=10,
         type=int,
         help="Number of URLs (and browser windows) to run in each batch. Default: 15, increase or decrease depending on your system capacity.",
     )
@@ -80,6 +84,16 @@ def cli():
     )
     parser.add_argument(
         "--blocklists", "-bf", default=None, help="Path to custom blocklists file"
+    )
+    parser.add_argument(
+        "--flow",
+        default="accept-all",
+        choices=["accept-all", "reject-all", "custom"],
+        help="Consent path to run per URL (default: accept-all)",
+    )
+    parser.add_argument(
+        "--categories",
+        help="Only for --flow custom e.g. analytics=off,advertising=off,functional=on"
     )
 
     args = parser.parse_args()
@@ -106,16 +120,16 @@ def cli():
 
     # List of URLs to test
     if args.url.endswith(".txt"):
+        urls = []
+        seen = set()
         with open(args.url, "r") as f:
-            urls = list(
-                set(
-                    [
-                        l.strip().lower()
-                        for l in set(f.readlines())
-                        if len(l) > 0 and not l.startswith("#")
-                    ]
-                )
-            )
+            for line in f:
+                s = line.strip().lower()
+                if not s or s.startswith("#"):
+                    continue
+                if s not in seen:
+                    seen.add(s)
+                    urls.append(s)
 
     elif args.url != "":
         candidates = [u.strip() for u in args.url.split(",")]
@@ -141,19 +155,64 @@ def cli():
         source_file=args.blocklists,
         force_bootstrap=args.bootstrap,
     )
+    def _parse_categories(s):
+        if not s:
+            return None
+        allowed = {"analytics", "functional", "advertising"}
+        aliases = {
+            "marketing": "advertising",
+            "ads": "advertising",
+            "advertisement": "advertising",
+        }
+        truthy = {"1", "true", "on", "yes"}
+        falsy  = {"0", "false", "off", "no"}
+        out = {}
+        for raw in s.split(","):
+            pair = raw.strip()
+            if not pair:
+                continue
+            if "=" not in pair:
+                raise ValueError(f"Invalid pair '{pair}'. Use key=value.")
+            k, v = pair.split("=", 1)
+            key = aliases.get(k.strip().lower(), k.strip().lower())
+            val = v.strip().lower()
+            if key not in allowed:
+                raise ValueError(f"Unknown category '{key}'. Allowed: {sorted(allowed)}")
+            if val in truthy:
+                out[key] = True
+            elif val in falsy:
+                out[key] = False
+            else:
+                raise ValueError(f"Invalid value '{val}' for {key}. Use on/off/true/false/yes/no/1/0")
+        return out
 
-    results = asyncio.run(
-        process_urls(
-            urls=urls,
-            batch_size=args.batch_size,
-            tracking_domains_list=blockers.get_domains(),
-            headless=args.headless,
-            screenshot=args.screenshot,
-            results_db_file=args.db_file,
-        )
-    )
+    try:
+        parsed_categories = _parse_categories(args.categories)
+    except ValueError as e:
+        parser.error(str(e))
+
+    # Enforce correct pairing of flags
+    if args.flow == "custom" and not parsed_categories:
+        parser.error("--categories is required when --flow custom "
+                     "(e.g., --categories 'analytics=off,advertising=off,functional=on')")
+    if parsed_categories and args.flow != "custom":
+        parser.error("--categories can only be used with --flow custom")
+
+    results = asyncio.run(process_urls(
+        urls=urls,
+        batch_size=args.batch_size,
+        tracking_domains_list=blockers.get_domains(),
+        headless=args.headless,
+        screenshot=args.screenshot,
+        results_db_file=args.db_file,
+        flow=args.flow,
+        custom_prefs=parsed_categories,
+    ))
 
     if args.show_output and len(results) < 25:
         sys.stdout.write(json.dumps(results, indent=2))
 
     sys.exit(0)
+
+if __name__ == "__main__":
+    cli()
