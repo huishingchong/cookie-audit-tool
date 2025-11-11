@@ -28,6 +28,7 @@ def action_label_for(action: str) -> str:
     if action == "reject":
         return "Reject"
     if action == "custom":
+    if action == "custom":
         return "Custom"
     return "Consent"
 
@@ -75,16 +76,57 @@ def load_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             if d not in row:
                 row[d] = None
         rows.append(row)
+        row = {c: r[i] for i, c in enumerate(cols)}
+        # Ensure missing desired columns appear as None
+        for d in desired:
+            if d not in row:
+                row[d] = None
+        rows.append(row)
     return rows
 
+def parse_json(raw: Optional[str]) -> Any:
 def parse_json(raw: Optional[str]) -> Any:
     if not raw:
         return None
     try:
         return json.loads(raw)
+        return json.loads(raw)
     except Exception:
         return None
 
+def parse_cookie_list(raw: Optional[str]) -> List[Dict[str, Any]]:
+    j = parse_json(raw)
+    return j if isinstance(j, list) else []
+
+def parse_json_obj(raw: Optional[str]) -> Optional[Dict[str, Any]]:
+    j = parse_json(raw)
+    return j if isinstance(j, dict) else None
+
+def parse_evidence_list(raw: Optional[str]) -> List[Dict[str, Any]]:
+    j = parse_json(raw)
+    return j if isinstance(j, list) else []
+
+def cookie_key(d: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+    nm = d.get("name")
+    if not nm:
+        return None
+    dom = (d.get("domain") or "").lstrip(".")
+    path = d.get("path") or "/"
+    return (str(nm), dom, path)
+
+def build_pages_seen(evidence: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str], List[str]]:
+    """
+    Build an ordered, de-duplicated list of URLs where each cookie (name,domain,path)
+    was observed. Uses:
+      - new_site_cookies (first seen here)
+      - changed_site_cookies.after (value/expiry changed here)
+      - browser_cookies (snapshot: present here)
+    """
+    seen: Dict[Tuple[str, str, str], List[str]] = {}
+    order_cache: Dict[Tuple[str, str, str], set] = {}
+    for ev in evidence or []:
+        url = ev.get("url")
+        if not url:
 def parse_cookie_list(raw: Optional[str]) -> List[Dict[str, Any]]:
     j = parse_json(raw)
     return j if isinstance(j, list) else []
@@ -153,6 +195,39 @@ def build_pages_seen(evidence: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str
 
     return seen
 
+        # First-seen cookies at this page
+        for c in (ev.get("new_site_cookies") or []):
+            k = cookie_key(c)
+            if not k: 
+                continue
+            lst = seen.setdefault(k, [])
+            cache = order_cache.setdefault(k, set())
+            if url not in cache:
+                lst.append(url); cache.add(url)
+
+        # Changed cookies: record that they were seen here too
+        for ch in (ev.get("changed_site_cookies") or []):
+            after = ch.get("after") or {}
+            k = cookie_key(after)
+            if not k:
+                continue
+            lst = seen.setdefault(k, [])
+            cache = order_cache.setdefault(k, set())
+            if url not in cache:
+                lst.append(url); cache.add(url)
+
+        # Snapshot presence: include the page if cookie exists in site-scoped browser_cookies
+        for c in (ev.get("browser_cookies") or []):
+            k = cookie_key(c)
+            if not k:
+                continue
+            lst = seen.setdefault(k, [])
+            cache = order_cache.setdefault(k, set())
+            if url not in cache:
+                lst.append(url); cache.add(url)
+
+    return seen
+
 def cookie_name_instances(cookies: List[Dict[str, Any]]) -> List[str]:
     lines: List[str] = []
     for d in cookies:
@@ -167,6 +242,17 @@ def cookie_name_instances(cookies: List[Dict[str, Any]]) -> List[str]:
             lines.append(f"{nm} ({dom}{path})" if dom or path else str(nm))
     return lines
 
+# def cookie_name_instances(cookies: List[Dict[str, Any]]) -> List[str]:
+#     # De-duplicate by cookie *name* only (ignore differing paths)
+#     names: List[str] = []
+#     seen: set = set()
+#     for d in cookies:
+#         nm = d.get("name")
+#         if not nm or nm in seen:
+#             continue
+#         names.append(str(nm))
+#         seen.add(nm)
+#     return names
 # def cookie_name_instances(cookies: List[Dict[str, Any]]) -> List[str]:
 #     # De-duplicate by cookie *name* only (ignore differing paths)
 #     names: List[str] = []
@@ -208,6 +294,16 @@ def fmt_seen_at(urls: List[str], limit: int = 12) -> List[str]:
     return [f"  - seen_at_urls:"] + [f"    • {u}" for u in head] + [f"    • … (+{rest} more)"]
 
 def fmt_cookie_breakdown(d: Dict[str, Any], include_value: bool, seen_map: Dict[Tuple[str, str, str], List[str]]) -> List[str]:
+def fmt_seen_at(urls: List[str], limit: int = 12) -> List[str]:
+    if not urls:
+        return []
+    if len(urls) <= limit:
+        return [f"  - seen_at_urls:"] + [f"    • {u}" for u in urls]
+    head = urls[:limit]
+    rest = len(urls) - limit
+    return [f"  - seen_at_urls:"] + [f"    • {u}" for u in head] + [f"    • … (+{rest} more)"]
+
+def fmt_cookie_breakdown(d: Dict[str, Any], include_value: bool, seen_map: Dict[Tuple[str, str, str], List[str]]) -> List[str]:
     lines = []
     if include_value and "value" in d:
         val = d.get("value")
@@ -237,9 +333,14 @@ def fmt_cookie_breakdown(d: Dict[str, Any], include_value: bool, seen_map: Dict[
     k = cookie_key(d)
     if k and seen_map:
         lines.extend(fmt_seen_at(seen_map.get(k, [])))
+    # Append where it was seen
+    k = cookie_key(d)
+    if k and seen_map:
+        lines.extend(fmt_seen_at(seen_map.get(k, [])))
     return lines
 
 def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sites: Optional[int], include_value: bool) -> str:
+    buckets: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     buckets: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for r in rows:
         act = (r.get(CONSENT_ACTION_COL) or "unknown").strip().lower()
@@ -260,6 +361,7 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
         prefs = parse_json_obj(r.get(CUSTOM_PREFS_COL))
         toggles = r.get(CUSTOM_TOGGLES_COL)
         debug = parse_json_obj(r.get(CUSTOM_DEBUG_COL))
+
 
         group_key = prefs_key(prefs) if act == "custom" else "__all__"
         b = buckets.setdefault(act, {})
@@ -306,6 +408,8 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                 lines.append("")
 
                 pre = info["pre"]; post = info["post"]
+
+                pre = info["pre"]; post = info["post"]
                 pre_names = cookie_name_instances(pre)
                 post_names = cookie_name_instances(post)
 
@@ -326,6 +430,7 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                 lines.append("")
 
                 label = action_label_for(action)
+                label = action_label_for(action)
                 lines.append(f"Before {label} — cookie count: {len(pre)}")
                 lines.append(f"After {label} — cookie count: {len(post)}")
                 lines.append("")
@@ -335,6 +440,8 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                     for d in pre:
                         nm = d.get("name", "<unnamed>")
                         lines.append(f"* {nm}")
+                        lines.extend(fmt_cookie_breakdown(d, include_value, info["pre_seen"]))
+                        lines.append("")
                         lines.extend(fmt_cookie_breakdown(d, include_value, info["pre_seen"]))
                         lines.append("")
                 else:
@@ -347,6 +454,7 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                         nm = d.get("name", "<unnamed>")
                         lines.append(f"* {nm}")
                         lines.extend(fmt_cookie_breakdown(d, include_value, info["post_seen"]))
+                        lines.extend(fmt_cookie_breakdown(d, include_value, info["post_seen"]))
                         lines.append("")
                 else:
                     lines.append("<none>")
@@ -356,6 +464,7 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                 lines.append("")
                 count += 1
 
+        lines.append("")
         lines.append("")
     return "\n".join(lines)
 
@@ -373,6 +482,7 @@ def main() -> int:
             rows=rows,
             only_action=args.only_action,
             max_sites=args.max_sites,
+            include_value=args.include_values,
             include_value=args.include_values,
         )
         if args.out:
