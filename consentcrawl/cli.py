@@ -16,6 +16,7 @@ async def process_urls(
     results_db_file="crawl_results.db",
     flow="accept-all",
     custom_prefs=None,
+    **kwargs,
 ):
     """
     Start the Playwright browser, run the URLs to test in batches asynchronously
@@ -31,7 +32,8 @@ async def process_urls(
         results_db_file=results_db_file,
         screenshot=screenshot,
         flow=flow,
-        custom_prefs=custom_prefs
+        custom_prefs=custom_prefs,
+        **kwargs,
     )
 
 
@@ -95,6 +97,26 @@ def cli():
         "--categories",
         help="Only for --flow custom e.g. analytics=off,advertising=off,functional=on"
     )
+
+    parser.add_argument(
+    "--depth",
+    type=int,
+    default=1,
+    help="Same-origin BFS depth for pre-consent exploration (default: 1).",
+    )
+    parser.add_argument(
+        "--max_pages",
+        type=int,
+        default=12,
+        help="Max number of same-origin pages to visit pre-consent (default: 12).",
+    )
+    parser.add_argument(
+        "--clicks",
+        type=int,
+        default=6,
+        help="Max non-destructive clicks per page pre-consent (default: 6).",
+    )
+
 
     args = parser.parse_args()
 
@@ -207,6 +229,9 @@ def cli():
         results_db_file=args.db_file,
         flow=args.flow,
         custom_prefs=parsed_categories,
+        depth=args.depth,
+        max_pages=args.max_pages,
+        clicks=args.clicks,
     ))
 
     if args.show_output and len(results) < 25:
