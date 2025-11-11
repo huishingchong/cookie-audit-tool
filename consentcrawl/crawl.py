@@ -84,8 +84,19 @@ def get_extract_schema():
         "post_third_party_domains": "STRING",
         "post_tracking_domains": "STRING",
 
-        "consent_action": "STRING",   # 'accept' or 'reject' or 'custom'
-        "consent_result": "STRING",   # 'clicked', 'clicked-uncertain', 'error', ''
+        "pre_page_evidence": "STRING",         # list[ { ts, url, note, document_cookie, browser_cookies[] } ]
+        "pre_set_cookie_events": "STRING",     # list[ { ts, response_url, set_cookie_header } ]
+        "pre_nav_log": "STRING",
+
+        "post_page_evidence": "STRING",         # list[ { ts, url, note, document_cookie, browser_cookies[] } ]
+        "post_set_cookie_events": "STRING",     # list[ { ts, response_url, set_cookie_header } ]
+        "post_nav_log": "STRING",
+
+        "pre_cookie_index": "STRING",
+        "post_cookie_index": "STRING",
+
+        "consent_action": "STRING",
+        "consent_result": "STRING",
         "custom_prefs_requested": "STRING",
         "custom_toggles_changed": "STRING",
         "custom_flow_debug": "STRING",
@@ -98,6 +109,7 @@ def get_extract_schema():
         "status_msg": "STRING",
         "landed_url": "STRING",
     }
+
 
 def get_consent_managers():
     with open(CONSENT_MANAGERS_FILE, "r") as f:
@@ -350,6 +362,7 @@ async def _site_cookies(context, site_etld1: str):
     return [
         {
             "name": c["name"],
+            "value": c.get("value"),
             "domain": c["domain"],
             "path": c.get("path"),
             "secure": bool(c.get("secure")),
@@ -391,6 +404,216 @@ async def _wait_cookie(context, site_etld1: str, min_ms=800, max_ms=6000, poll_m
         elapsed += poll_ms
     return last
 
+
+
+## Extend crawler
+# --- PRE-CONSENT EXPLORATION HELPERS ---
+
+from urllib.parse import urljoin, urlparse
+
+def _same_origin(u1: str, u2: str) -> bool:
+    try:
+        a, b = urlparse(u1), urlparse(u2)
+        return (a.scheme, a.hostname, a.port) == (b.scheme, b.hostname, b.port)
+    except Exception:
+        return False
+
+def _is_safe_href(href: str) -> bool:
+    if not href:
+        return False
+    href = href.strip()
+    if href.startswith(("javascript:", "mailto:", "tel:", "sms:")):
+        return False
+    # skip obvious logout/delete endpoints
+    if re.search(r"(logout|signout|delete|unsubscribe|remove-account)", href, re.I):
+        return False
+    return True
+
+def _diff_site_cookies(prev, cur):
+    prev_map = {(c["name"], c.get("domain"), c.get("path")): c for c in prev or []}
+    cur_map  = {(c["name"], c.get("domain"), c.get("path")): c for c in cur or []}
+    added = [cur_map[k] for k in cur_map.keys() - prev_map.keys()]
+    changed = []
+    for k in cur_map.keys() & prev_map.keys():
+        if cur_map[k].get("expires") != prev_map[k].get("expires") or cur_map[k].get("value") != prev_map[k].get("value"):
+            changed.append({"before": prev_map[k], "after": cur_map[k]})
+    return added, changed
+
+
+async def _scroll_and_settle(page, short=False):
+    try:
+        # small scrolls to trigger lazy observers
+        for dy in (200, 600, 1200, 0, -200):
+            await page.mouse.wheel(0, dy)
+            await page.wait_for_timeout(250 if short else 400)
+        try:
+            await page.wait_for_load_state("networkidle", timeout=2000 if short else 4000)
+        except PlaywrightTimeoutError:
+            pass
+    except Exception:
+        pass
+
+async def _click_non_destructive(page, max_clicks=8):
+    """
+    Click 'safe' UI elements on the current page that often expand content:
+    - buttons/links that look like menus, tabs, 'load more', accordions
+    """
+    clicks = 0
+    candidates = await page.locator(
+        "button, [role='button'], a[role='button'], summary, .accordion button, .accordion [role='button']"
+    ).all()
+
+    for el in candidates:
+        if clicks >= max_clicks:
+            break
+        try:
+            if not await el.is_visible():
+                continue
+            # Cache inner text once; it can be slow
+            try:
+                txt = (await el.inner_text() or "").lower()
+            except Exception:
+                txt = ""
+            outer = (await el.evaluate("el => el.outerHTML") or "").lower()
+
+            if any(s in outer or s in txt for s in ["menu", "more", "expand", "open", "tab", "accordion", "details", "filter"]):
+                await el.scroll_into_view_if_needed()
+                await el.click(timeout=1500)
+                clicks += 1
+                await page.wait_for_timeout(400)
+        except Exception:
+            continue
+
+    await _scroll_and_settle(page, short=True)
+
+
+async def _collect_same_origin_links(page, max_links=25):
+    origin = page.url
+    urls = set()
+    anchors = await page.locator("a[href]").all()
+
+    for a in anchors:
+        try:
+            href = await a.get_attribute("href")
+            if not _is_safe_href(href):
+                continue
+            absu = urljoin(origin, href)
+            if not _same_origin(absu, origin):
+                continue
+            u = urlparse(absu)
+            norm = f"{u.scheme}://{u.netloc}{u.path}" + (f"?{u.query}" if u.query else "")
+            urls.add(norm)
+            if len(urls) >= max_links:
+                break
+        except Exception:
+            continue
+    return list(urls)
+
+
+async def _pre_consent_explore(page, max_pages=10, max_depth=1, max_clicks_per_page=6, evidence_cb=None, context=None, label="pre"):
+    """
+    Shallow BFS over same-origin links, without consent interaction.
+    """
+    start = page.url
+    visited = set([start])
+    queue = [(start, 0)]
+    frontier_cache = []
+
+    # collect a frontier from landing page first
+    try:
+        frontier_cache = await _collect_same_origin_links(page, max_links=max_pages)
+    except Exception:
+        frontier_cache = []
+    for u in frontier_cache:
+        if u not in visited:
+            queue.append((u, 1))
+
+    # On the landing page, do some safe clicks too
+    await _click_non_destructive(page, max_clicks=max_clicks_per_page)
+
+    while queue and len(visited) < max_pages:
+        url, depth = queue.pop(0)
+        if url in visited:
+            continue
+        visited.add(url)
+        try:
+            logging.info(f"[{label}] visiting depth={depth}: {url}")
+            await page.goto(url, wait_until="load", timeout=30000)
+        except Exception:
+            continue
+        await _scroll_and_settle(page)
+        await _click_non_destructive(page, max_clicks=max_clicks_per_page)
+        if evidence_cb:
+            await evidence_cb(context, page, note=f"visit depth={depth}")
+
+        if depth < max_depth:
+            try:
+                more = await _collect_same_origin_links(page, max_links=max_pages)
+                for v in more:
+                    if v not in visited:
+                        queue.append((v, depth + 1))
+            except Exception:
+                pass
+
+    # return to the start if still same-origin (not required, but nice)
+    try:
+        if _same_origin(start, page.url):
+            await page.goto(start, wait_until="domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+
+async def _record_page_evidence(output_evidence_list, context, page, site_etld1, state, note=None):
+    try:
+        ts = int(datetime.utcnow().timestamp() * 1000)
+        visited = page.url
+
+        # site-scoped browser cookies (includes HttpOnly)
+        site_cookies = await _site_cookies(context, site_etld1)
+        added, changed = _diff_site_cookies(state.get("last_site_cookies"), site_cookies)
+        state["last_site_cookies"] = site_cookies  # update baseline
+
+        try:
+            document_cookie = await page.evaluate("() => document.cookie")
+        except Exception:
+            document_cookie = None
+
+        output_evidence_list.append({
+            "ts": ts,
+            "url": visited,
+            "note": note,
+            "document_cookie": document_cookie,
+            "browser_cookies": site_cookies,     # full snapshot (site-scoped)
+            "new_site_cookies": added,           # ← cookies first seen at/after this page
+            "changed_site_cookies": changed,     # ← value/expiry changed at/after this page
+        })
+    except Exception as e:
+        logging.debug(f"record_page_evidence failed: {e}")
+
+def _build_cookie_index(page_evidence):
+    idx = {}
+    for ev in page_evidence or []:
+        url = ev.get("url")
+        # mark presence on every page
+        for c in (ev.get("browser_cookies") or []):
+            key = (c.get("name"), c.get("domain"), c.get("path"))
+            entry = idx.setdefault(key, {"first_seen_url": url, "pages_seen": []})
+            if "first_seen_url" not in entry or not entry["first_seen_url"]:
+                entry["first_seen_url"] = url
+            if url not in entry["pages_seen"]:
+                entry["pages_seen"].append(url)
+        # might still want to track event pages separately
+        # use new_site_cookies/changed_site_cookies if useful?
+    return idx
+
+def cookie_index_to_list(idx):
+    out = []
+    for (name, domain, path), val in (idx or {}).items():
+        rec = {"name": name, "domain": domain, "path": path}
+        rec.update(val or {})
+        out.append(rec)
+    return out
+
+
 async def crawl_url(
     url,
     browser,
@@ -401,6 +624,7 @@ async def crawl_url(
     consent_action: str = "accept",
     custom_prefs=None,
     critical_sem=None,
+    **kwargs,
 ):
     output = {k: None for k in get_extract_schema().keys()}
     output["screenshot_files"] = []
@@ -457,16 +681,25 @@ async def crawl_url(
         page = await browser_context.new_page()
         page.on("request", request_handler)
 
-        # watch for Set-Cookie headers to adapt post-settle timing
-        set_cookie_seen = {"count": 0, "recent": 0}
+        # capture network-level Set-Cookie events (list) + activity counters
+        set_cookie_events = []                     # [{ ts, response_url, set_cookie_header }]
+        set_cookie_activity = {"total": 0, "recent": 0}
+
         def _on_response(resp):
             try:
-                if resp.headers.get("set-cookie"):
-                    set_cookie_seen["count"] += 1
-                    set_cookie_seen["recent"] += 1
+                hdr = resp.headers.get("set-cookie")
+                if hdr:
+                    set_cookie_events.append({
+                        "ts": int(datetime.utcnow().timestamp() * 1000),
+                        "response_url": resp.url,
+                        "set_cookie_header": hdr,
+                    })
+                    set_cookie_activity["total"] += 1
+                    set_cookie_activity["recent"] += 1
             except Exception:
                 pass
         page.on("response", _on_response)
+
 
         try:
             await page.goto(url, wait_until="load", timeout=90000)
@@ -517,7 +750,46 @@ async def crawl_url(
         output["meta_tags"] = await get_meta_tags(page)
 
         tracking_set = {h.lower() for h in (tracking_domains_list or [])}
-        thirdparty_requests_pre = [r for r in req_urls_pre if is_third_party(r, page.url)]
+
+        # --- PRE-CONSENT EXPLORATION ---
+        # Prepare evidence collection
+        # inside crawl_url, after site_etld1 computed and initial waits:
+        state = {"last_site_cookies": await _site_cookies(browser_context, site_etld1)}
+        nav_log = []
+        pre_page_evidence = []
+        async def _evidence_cb(cxt, pg, note=None):
+            nav_log.append({"ts": int(datetime.utcnow().timestamp()*1000), "url": pg.url, "note": note})
+            await _record_page_evidence(pre_page_evidence, cxt, pg, site_etld1, state, note=note)
+
+
+        # record landing page BEFORE exploring
+        await _evidence_cb(browser_context, page, note="landing")
+
+
+        try:
+            await _pre_consent_explore(
+                page,
+                max_pages=kwargs.get("max_pages", 12) if kwargs else 12,
+                max_depth=kwargs.get("depth", 1) if kwargs else 1,
+                max_clicks_per_page=kwargs.get("clicks", 6) if kwargs else 6,
+                evidence_cb=_evidence_cb,
+                context=browser_context,
+                label="pre"
+            )
+        except Exception as e:
+            logging.debug(f"Pre-consent exploration failed: {e}")
+
+        output["pre_nav_log"] = nav_log
+
+        # Save evidence gathered during exploration
+        output["pre_page_evidence"] = pre_page_evidence
+
+        # Small settle so last async tracker calls finish
+        await page.wait_for_timeout(1000)
+
+        landing_url_for_context = output["landed_url"] or page.url
+
+        thirdparty_requests_pre = [r for r in req_urls_pre if is_third_party(r, landing_url_for_context)]
         output["pre_third_party_domains"] = sorted({
             registrable_domain(host_from_url(r))
             for r in thirdparty_requests_pre
@@ -529,6 +801,7 @@ async def crawl_url(
             if is_blocklisted_host(host_from_url(r), tracking_set)
         })
 
+
         output["pre_cookies"] = await _wait_cookie(browser_context, site_etld1, min_ms=800, max_ms=5000, poll_ms=300)
         output["pre_cookies"].sort(key=lambda c: c.get("name") or "")
 
@@ -538,6 +811,11 @@ async def crawl_url(
             await page.bring_to_front()
         except Exception:
             pass
+
+        # Persist all network Set-Cookie events seen so far as "pre"
+        output["pre_set_cookie_events"] = list(set_cookie_events)
+        pre_events_len = len(set_cookie_events)
+
         consent_boundary_reached = True
 
         # critical window guarded by a small semaphore (reduces contention)
@@ -620,14 +898,53 @@ async def crawl_url(
             await page.wait_for_timeout(wait_for_timeout)
 
         # small adaptive extension if Set-Cookie headers are still arriving
-        if set_cookie_seen["count"] > 0:
+        if set_cookie_activity["total"] > 0:
             for _ in range(3):
-                if set_cookie_seen["recent"] == 0:
+                if set_cookie_activity["recent"] == 0:
                     break
-                set_cookie_seen["recent"] = 0
+                set_cookie_activity["recent"] = 0
                 await page.wait_for_timeout(1000)
 
+
         thirdparty_requests_post = [r for r in req_urls_post if is_third_party(r, page.url)]
+
+        # right after your post-consent waits and adaptive extension,
+        # BEFORE computing post_third_party_domains / post_cookies:
+
+        post_state = {"last_site_cookies": await _site_cookies(browser_context, site_etld1)}
+        post_nav_log = []
+        post_page_evidence = []
+
+        async def _post_evidence_cb(cxt, pg, note=None):
+            post_nav_log.append({"ts": int(datetime.utcnow().timestamp()*1000), "url": pg.url, "note": note})
+            await _record_page_evidence(post_page_evidence, cxt, pg, site_etld1, post_state, note=note)
+
+        # record current page first
+        await _post_evidence_cb(browser_context, page, note="post-landing")
+
+        try:
+            await _pre_consent_explore(
+                page,
+                max_pages=kwargs.get("post_max_pages", kwargs.get("max_pages", 12)),
+                max_depth=kwargs.get("post_depth", kwargs.get("depth", 1)),
+                max_clicks_per_page=kwargs.get("post_clicks", kwargs.get("clicks", 6)),
+                evidence_cb=_post_evidence_cb,
+                context=browser_context,
+                label="pro"
+            )
+        except Exception as e:
+            logging.debug(f"Post-consent exploration failed: {e}")
+
+        output["post_nav_log"] = post_nav_log
+        output["post_page_evidence"] = post_page_evidence
+
+        try:
+            output["pre_cookie_index"]  = cookie_index_to_list(_build_cookie_index(output["pre_page_evidence"]))
+            output["post_cookie_index"] = cookie_index_to_list(_build_cookie_index(output.get("post_page_evidence") or []))
+        except Exception as e:
+            logging.debug(f"cookie index build failed: {e}")
+
+
         output["post_third_party_domains"] = sorted({
             registrable_domain(host_from_url(r))
             for r in thirdparty_requests_post
@@ -641,6 +958,7 @@ async def crawl_url(
 
         output["post_cookies"] = await _wait_cookie(browser_context, site_etld1, min_ms=2000, max_ms=15000, poll_ms=400)
         output["post_cookies"].sort(key=lambda c: c.get("name") or "")
+        output["post_set_cookie_events"] = set_cookie_events[pre_events_len:]
 
         output["status"] = "success"
         output["status_msg"] = f"Successfully extracted data from {url}"
@@ -715,14 +1033,22 @@ async def crawl_batch(
                                 consent_action=_map_flow_to_action(flow),
                                 custom_prefs=custom_prefs,
                                 critical_sem=critical_sem,
+                                **kwargs,
                             )
                         )
                     except Exception as e:
                         logging.error(f"Failed to launch browser for {url}: {e}")
                 if tasks:
-                    batch_results = await asyncio.gather(*tasks)
+                    batch_results = [r for r in await asyncio.gather(*tasks)]
                     all_results.extend(batch_results)
-                    await results_function(batch_results, **kwargs)
+                    logging.debug(f"Retrieved batch of {len(tasks)} URLs")
+                    rf_kwargs = {}
+                    for k in ("file", "results_db_file", "table_name"):
+                        if k in kwargs and kwargs[k] is not None:
+                            rf_kwargs[k] = kwargs[k]
+                    await results_function(batch_results, **rf_kwargs)
+
+
                 for b in browsers:
                     try:
                         await b.close()
@@ -755,13 +1081,18 @@ async def crawl_batch(
                     consent_action=_map_flow_to_action(flow),
                     custom_prefs=custom_prefs,
                     critical_sem=critical_sem,
+                    **kwargs,
                 )
                 for url in urls_batch
             ]
             batch_results = [r for r in await asyncio.gather(*tasks)]
             all_results.extend(batch_results)
             logging.debug(f"Retrieved batch of {len(tasks)} URLs")
-            await results_function(batch_results, **kwargs)
+            rf_kwargs = {}
+            for k in ("file", "results_db_file", "table_name"):
+                if k in kwargs and kwargs[k] is not None:
+                    rf_kwargs[k] = kwargs[k]
+            await results_function(batch_results, **rf_kwargs)
 
         await browser.close()
     return all_results
