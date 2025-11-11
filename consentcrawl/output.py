@@ -14,6 +14,8 @@ DOMAIN_COL = "domain_name"
 URL_COL = "url"
 PRE_COOKIES_COL = "pre_cookies"
 POST_COOKIES_COL = "post_cookies"
+PRE_EVIDENCE_COL = "pre_page_evidence"
+POST_EVIDENCE_COL = "post_page_evidence"
 CONSENT_ACTION_COL = "consent_action"  # e.g., 'accept' or 'reject'
 CUSTOM_PREFS_COL = "custom_prefs_requested"
 CUSTOM_TOGGLES_COL = "custom_toggles_changed"
@@ -25,10 +27,9 @@ def action_label_for(action: str) -> str:
         return "Accept"
     if action == "reject":
         return "Reject"
-    if action =="custom":
+    if action == "custom":
         return "Custom"
     return "Consent"
-
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(
@@ -41,9 +42,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--include-values", action="store_true", help="Include cookie 'value' attribute in breakdown")
     return p.parse_args()
 
-
 def to_iso(ts: Any) -> Optional[str]:
-    """Convert a unix timestamp to ISO-8601 (UTC) if plausible; return None for missing/invalid values."""
     try:
         t = float(ts)
         if t <= 0:
@@ -52,64 +51,109 @@ def to_iso(ts: Any) -> Optional[str]:
     except Exception:
         return None
 
-
 def load_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
-    cols = [ID_COL, DOMAIN_COL, URL_COL, PRE_COOKIES_COL, POST_COOKIES_COL, CONSENT_ACTION_COL, CUSTOM_PREFS_COL, CUSTOM_TOGGLES_COL, CUSTOM_DEBUG_COL]
+    """Select only columns that exist, defaulting missing ones to None."""
+    desired = [
+        ID_COL, DOMAIN_COL, URL_COL,
+        PRE_COOKIES_COL, POST_COOKIES_COL,
+        PRE_EVIDENCE_COL, POST_EVIDENCE_COL,
+        CONSENT_ACTION_COL, CUSTOM_PREFS_COL, CUSTOM_TOGGLES_COL, CUSTOM_DEBUG_COL
+    ]
+    # Discover available columns
+    cur = conn.execute(f'PRAGMA table_info("{TABLE}")')
+    have = {row[1] for row in cur.fetchall()}  # set of column names
+    cols = [c for c in desired if c in have]
+
+    if ID_COL not in cols: cols.insert(0, ID_COL)
     sql = f'SELECT {", ".join([f"""\"{c}\"""" for c in cols])} FROM "{TABLE}"'
     cur = conn.execute(sql)
     rows = []
     for r in cur.fetchall():
-        rows.append({c: r[i] for i, c in enumerate(cols)})
+        row = {c: r[i] for i, c in enumerate(cols)}
+        # Ensure missing desired columns appear as None
+        for d in desired:
+            if d not in row:
+                row[d] = None
+        rows.append(row)
     return rows
 
+def parse_json(raw: Optional[str]) -> Any:
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
 
 def parse_cookie_list(raw: Optional[str]) -> List[Dict[str, Any]]:
-    if not raw:
-        return []
-    s = raw.strip()
-    if not s:
-        return []
-    try:
-        j = json.loads(s)
-        if isinstance(j, list):
-            # Ensure each cookie is a dict
-            return [d for d in j if isinstance(d, dict)]
-        # Unexpected format; fallback to empty
-        return []
-    except Exception:
-        return []
+    j = parse_json(raw)
+    return j if isinstance(j, list) else []
 
 def parse_json_obj(raw: Optional[str]) -> Optional[Dict[str, Any]]:
-    if not raw:
-        return None
-    try:
-        j = json.loads(raw)
-        if isinstance(j, dict):
-            return j
-        return None
-    except Exception:
-        return None
+    j = parse_json(raw)
+    return j if isinstance(j, dict) else None
 
-def cookie_name_list(cookies: List[Dict[str, Any]]) -> List[str]:
-    names = []
-    for d in cookies:
-        nm = d.get("name")
-        if nm is None:
+def parse_evidence_list(raw: Optional[str]) -> List[Dict[str, Any]]:
+    j = parse_json(raw)
+    return j if isinstance(j, list) else []
+
+def cookie_key(d: Dict[str, Any]) -> Optional[Tuple[str, str, str]]:
+    nm = d.get("name")
+    if not nm:
+        return None
+    dom = (d.get("domain") or "").lstrip(".")
+    path = d.get("path") or "/"
+    return (str(nm), dom, path)
+
+def build_pages_seen(evidence: List[Dict[str, Any]]) -> Dict[Tuple[str, str, str], List[str]]:
+    """
+    Build an ordered, de-duplicated list of URLs where each cookie (name,domain,path)
+    was observed. Uses:
+      - new_site_cookies (first seen here)
+      - changed_site_cookies.after (value/expiry changed here)
+      - browser_cookies (snapshot: present here)
+    """
+    seen: Dict[Tuple[str, str, str], List[str]] = {}
+    order_cache: Dict[Tuple[str, str, str], set] = {}
+    for ev in evidence or []:
+        url = ev.get("url")
+        if not url:
             continue
-        names.append(str(nm))
-    # keep original order but drop exact duplicates while retaining first occurrence
-    seen = set()
-    unique_ordered = []
-    for n in names:
-        if n not in seen:
-            seen.add(n)
-            unique_ordered.append(n)
-    return unique_ordered
+
+        # First-seen cookies at this page
+        for c in (ev.get("new_site_cookies") or []):
+            k = cookie_key(c)
+            if not k: 
+                continue
+            lst = seen.setdefault(k, [])
+            cache = order_cache.setdefault(k, set())
+            if url not in cache:
+                lst.append(url); cache.add(url)
+
+        # Changed cookies: record that they were seen here too
+        for ch in (ev.get("changed_site_cookies") or []):
+            after = ch.get("after") or {}
+            k = cookie_key(after)
+            if not k:
+                continue
+            lst = seen.setdefault(k, [])
+            cache = order_cache.setdefault(k, set())
+            if url not in cache:
+                lst.append(url); cache.add(url)
+
+        # Snapshot presence: include the page if cookie exists in site-scoped browser_cookies
+        for c in (ev.get("browser_cookies") or []):
+            k = cookie_key(c)
+            if not k:
+                continue
+            lst = seen.setdefault(k, [])
+            cache = order_cache.setdefault(k, set())
+            if url not in cache:
+                lst.append(url); cache.add(url)
+
+    return seen
 
 def cookie_name_instances(cookies: List[Dict[str, Any]]) -> List[str]:
-    """
-    Return one display line per cookie. If same cookie name but different domain, output the domain name
-    """
     lines: List[str] = []
     for d in cookies:
         nm = d.get("name")
@@ -117,23 +161,29 @@ def cookie_name_instances(cookies: List[Dict[str, Any]]) -> List[str]:
             continue
         dom = (d.get("domain") or "").lstrip(".")
         path = d.get("path") or "/"
-        # lines.append(f"{nm} ({dom}{path})" if dom or path else str(nm))
         if nm not in lines:
             lines.append(nm)
         else:
             lines.append(f"{nm} ({dom}{path})" if dom or path else str(nm))
     return lines
 
+# def cookie_name_instances(cookies: List[Dict[str, Any]]) -> List[str]:
+#     # De-duplicate by cookie *name* only (ignore differing paths)
+#     names: List[str] = []
+#     seen: set = set()
+#     for d in cookies:
+#         nm = d.get("name")
+#         if not nm or nm in seen:
+#             continue
+#         names.append(str(nm))
+#         seen.add(nm)
+#     return names
 
 ATTR_ORDER = [
     "domain", "path", "secure", "httpOnly", "sameSite", "expires", "expires_days", "session", "size", "priority"
 ]
 
 def prefs_key(preferences: Optional[Dict[str, Any]]) -> str:
-    """
-    Build a categories string to group custom flows.
-    Only prints keys present; default order: analytics, advertising, functional.
-    """
     if not preferences:
         return "<no-categories>"
     order = ("analytics", "advertising", "functional")
@@ -142,17 +192,23 @@ def prefs_key(preferences: Optional[Dict[str, Any]]) -> str:
         if k in preferences:
             v = preferences.get(k)
             parts.append(f"{k}={'on' if v else 'off'}")
-    # Include any extra unexpected keys, deterministic order
     extras = sorted([k for k in preferences.keys() if k not in order])
     for k in extras:
         v = preferences.get(k)
         parts.append(f"{k}={'on' if bool(v) else 'off'}")
     return ", ".join(parts) if parts else "<no-categories>"
 
-def fmt_cookie_breakdown(d: Dict[str, Any], include_value: bool) -> List[str]:
-    """Return lines for the bullet-list of attributes (without the cookie name line)."""
+def fmt_seen_at(urls: List[str], limit: int = 12) -> List[str]:
+    if not urls:
+        return []
+    if len(urls) <= limit:
+        return [f"  - seen_at_urls:"] + [f"    • {u}" for u in urls]
+    head = urls[:limit]
+    rest = len(urls) - limit
+    return [f"  - seen_at_urls:"] + [f"    • {u}" for u in head] + [f"    • … (+{rest} more)"]
+
+def fmt_cookie_breakdown(d: Dict[str, Any], include_value: bool, seen_map: Dict[Tuple[str, str, str], List[str]]) -> List[str]:
     lines = []
-    # Value is optional (can be long / sensitive); include on request
     if include_value and "value" in d:
         val = d.get("value")
         if isinstance(val, str):
@@ -160,7 +216,6 @@ def fmt_cookie_breakdown(d: Dict[str, Any], include_value: bool) -> List[str]:
             lines.append(f"  - value: {preview}")
         else:
             lines.append(f"  - value: {val}")
-    # Standard attributes in a consistent order
     for k in ATTR_ORDER:
         if k in d:
             v = d.get(k)
@@ -172,19 +227,20 @@ def fmt_cookie_breakdown(d: Dict[str, Any], include_value: bool) -> List[str]:
                     lines.append(f"  - expires: {v}")
             else:
                 lines.append(f"  - {k}: {v}")
-    # Print any remaining non-empty attributes that aren't in ATTR_ORDER or value
     for k, v in d.items():
         if k in ATTR_ORDER or k == "value":
             continue
         if v is None or (isinstance(v, str) and v.strip() == ""):
             continue
         lines.append(f"  - {k}: {v}")
+    # Append where it was seen
+    k = cookie_key(d)
+    if k and seen_map:
+        lines.extend(fmt_seen_at(seen_map.get(k, [])))
     return lines
 
-
 def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sites: Optional[int], include_value: bool) -> str:
-    # Categorise by consent_action (accept, reject, or None->'unknown')
-    buckets: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    buckets: Dict[str, Dict[str, List[Dict[str, Any]]]] = {}
     for r in rows:
         act = (r.get(CONSENT_ACTION_COL) or "unknown").strip().lower()
         if only_action and act != only_action:
@@ -195,11 +251,16 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
 
         pre = parse_cookie_list(r.get(PRE_COOKIES_COL))
         post = parse_cookie_list(r.get(POST_COOKIES_COL))
+        pre_ev = parse_evidence_list(r.get(PRE_EVIDENCE_COL))
+        post_ev = parse_evidence_list(r.get(POST_EVIDENCE_COL))
+
+        pre_seen_map = build_pages_seen(pre_ev)
+        post_seen_map = build_pages_seen(post_ev)
 
         prefs = parse_json_obj(r.get(CUSTOM_PREFS_COL))
         toggles = r.get(CUSTOM_TOGGLES_COL)
         debug = parse_json_obj(r.get(CUSTOM_DEBUG_COL))
-        
+
         group_key = prefs_key(prefs) if act == "custom" else "__all__"
         b = buckets.setdefault(act, {})
         b.setdefault(group_key, []).append({
@@ -208,6 +269,8 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
             "url": url,
             "pre": pre,
             "post": post,
+            "pre_seen": pre_seen_map,
+            "post_seen": post_seen_map,
             "prefs": prefs,
             "toggles": toggles,
             "dbg": debug,
@@ -218,7 +281,6 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
         sites = buckets[action]
         lines.append(f"CONSENT ACTION: {action}")
         lines.append("")
-        # Iterate groups (for custom it is each categories combo)
         for group_key in sorted(sites.keys()):
             if action == "custom":
                 lines.append(f"CATEGORIES: {group_key}")
@@ -232,7 +294,6 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                     lines.append(f"domain_name: {info['domain']}")
                 if info.get("url"):
                     lines.append(f"url: {info['url']}")
-                # Optional minimal custom details (only printed for custom)
                 if action == "custom":
                     if info.get("prefs"):
                         lines.append(f"custom_prefs_requested: {prefs_key(info['prefs'])}")
@@ -243,18 +304,11 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                         sv = info["dbg"].get("saved")
                         lines.append(f"custom_flow_debug: manage_opened={mo}, saved={sv}")
                 lines.append("")
-            
 
-                # pre/post lists
-                pre = info["pre"]
-                post = info["post"]
-
-                # pre_names = cookie_name_list(pre)
-                # post_names = cookie_name_list(post)
+                pre = info["pre"]; post = info["post"]
                 pre_names = cookie_name_instances(pre)
                 post_names = cookie_name_instances(post)
 
-                # Names lists (unchanged)
                 lines.append("pre_cookies — names:")
                 if pre_names:
                     for n in pre_names:
@@ -271,20 +325,18 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                     lines.append("- <none>")
                 lines.append("")
 
-                # Action-specific counts before the breakdowns
-                label = action_label_for(action)  # action is the consent bucket key
+                label = action_label_for(action)
                 lines.append(f"Before {label} — cookie count: {len(pre)}")
                 lines.append(f"After {label} — cookie count: {len(post)}")
                 lines.append("")
 
-                # Breakdown (NAME as the heading, then indented bullets)
                 lines.append("pre_cookies — breakdown:")
                 if pre:
                     for d in pre:
                         nm = d.get("name", "<unnamed>")
                         lines.append(f"* {nm}")
-                        lines.extend(fmt_cookie_breakdown(d, include_value))  # prints "  - domain: ...", etc.
-                        lines.append("")  # spacer between cookies
+                        lines.extend(fmt_cookie_breakdown(d, include_value, info["pre_seen"]))
+                        lines.append("")
                 else:
                     lines.append("<none>")
                 lines.append("")
@@ -294,7 +346,7 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                     for d in post:
                         nm = d.get("name", "<unnamed>")
                         lines.append(f"* {nm}")
-                        lines.extend(fmt_cookie_breakdown(d, include_value))
+                        lines.extend(fmt_cookie_breakdown(d, include_value, info["post_seen"]))
                         lines.append("")
                 else:
                     lines.append("<none>")
@@ -304,9 +356,8 @@ def build_report(rows: List[Dict[str, Any]], only_action: Optional[str], max_sit
                 lines.append("")
                 count += 1
 
-        lines.append("")  # extra space between action buckets
+        lines.append("")
     return "\n".join(lines)
-
 
 def main() -> int:
     args = parse_args()
@@ -322,7 +373,7 @@ def main() -> int:
             rows=rows,
             only_action=args.only_action,
             max_sites=args.max_sites,
-            include_value=args.include_values if hasattr(args, "include_values") else args.include_values,
+            include_value=args.include_values,
         )
         if args.out:
             with open(args.out, "w", encoding="utf-8") as f:
@@ -336,7 +387,6 @@ def main() -> int:
         return 1
     finally:
         conn.close()
-
 
 if __name__ == "__main__":
     sys.exit(main())
