@@ -62,5 +62,31 @@ python -m consentcrawl.classification \
 # Challenge cases:
 # python -m consentcrawl.cli https://www.houseoffraser.co.uk/,https://sg.sportsdirect.com,https://us.sportsdirect.com,https://www.studio.co.uk --flow accept-all --batch_size 1 --db_file outputdb
 
+'''
+python3 -m consentcrawl \
+  --db_file database.db \
+  --flow accept-all \
+  --urls frasers.txt \
+  --depth 1 \
+  --max_pages 12 \
+  --clicks 6
+'''
 
-# Pls compare fix2 and cix 3 thoroguhly. Fix2 is ran with per_url_browser=False. Fix3 is ran with per_url_browser=True. check the diff. And whether per url browser makes a difference in post cookie count
+'''
+python3 -m consentcrawl \
+  --db_file check.db \
+  --flow accept-all \
+  --urls https://www.houseoffraser.co.uk/,https://sg.sportsdirect.com,https://us.sportsdirect.com,https://www.studio.co.uk  \
+  --depth 3 \
+  --max_pages 20 \
+  --clicks 20
+'''
+
+'''
+python3 -m consentcrawl   https://www.houseoffraser.co.uk \
+  --db_file hof.db \
+  --flow accept-all \
+  --max_pages 20 \
+  --depth 3 \
+  --clicks 20
+'''
