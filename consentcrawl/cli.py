@@ -16,6 +16,7 @@ async def process_urls(
     results_db_file="crawl_results.db",
     flow="accept-all",
     custom_prefs=None,
+    collect_domains=True,
     **kwargs,
 ):
     """
@@ -33,6 +34,7 @@ async def process_urls(
         screenshot=screenshot,
         flow=flow,
         custom_prefs=custom_prefs,
+        collect_domains=collect_domains,
         **kwargs,
     )
 
@@ -117,6 +119,56 @@ def cli():
         help="Max non-destructive clicks per page pre-consent (default: 6).",
     )
 
+    parser.add_argument(
+        "--cookies_only",
+        default=False,
+        action="store_true",
+        help="Only collect cookies (skip third-party/tracking domain analysis and skip blocklist loading)",
+    )
+
+    # parser.add_argument(
+    #     "--auth",
+    #     type=utils.string_to_boolean,
+    #     default=False,
+    #     help="Run crawler after authentication? (yes/no)",
+    # )
+
+    parser.add_argument(
+        "--login-auto",
+        action="store_true",
+        default=False,
+        help="Attempt to auto-discover a login/sign-in UI and authenticate before crawling.",
+    )
+    parser.add_argument(
+        "--login-success-selector",
+        default=None,
+        help="CSS selector that is present only when logged in (e.g. account link).",
+    )
+    parser.add_argument(
+        "--login-username-env",
+        default=None,
+        help="Env var name containing username for login (preferred).",
+    )
+    parser.add_argument(
+        "--login-password-env",
+        default=None,
+        help="Env var name containing password for login (preferred).",
+    )
+    parser.add_argument(
+        "--username",
+        default=None,
+        help="Username for login (use only for quick tests; prefer env).",
+    )
+    parser.add_argument(
+        "--password",
+        default=None,
+        help="Password for login (use only for quick tests; prefer env).",
+    )
+    parser.add_argument(
+        "--login-storage-state",
+        default=None,
+        help="Path to save storage_state after successful login (optional).",
+    )
 
     args = parser.parse_args()
 
@@ -166,17 +218,23 @@ def cli():
             if not parsed_url.scheme in ("http", "https") or not parsed_url.hostname or "." not in parsed_url.hostname:
                 logging.error(f"Invalid URL skipped: {u}")
                 continue
-            urls.append(f"{parsed_url.scheme}://{parsed_url.hostname}")
+            # urls.append(f"{parsed_url.scheme}://{parsed_url.hostname}")
+            urls.append(parsed_url.geturl())
 
     else:
         logging.error("No URL or valid .txt file with URLs to test")
 
-    # Bootstrap blocklists
-    blockers = blocklists.Blocklists(
-        db_file=args.db_file,
-        source_file=args.blocklists,
-        force_bootstrap=args.bootstrap,
-    )
+    if args.cookies_only:
+        tracking_domains = []
+    else:
+        # Bootstrap blocklists
+        blockers = blocklists.Blocklists(
+            db_file=args.db_file,
+            source_file=args.blocklists,
+            force_bootstrap=args.bootstrap,
+        )
+        tracking_domains = blockers.get_domains()
+
     def _parse_categories(s):
         if not s:
             return None
@@ -212,18 +270,51 @@ def cli():
         parsed_categories = _parse_categories(args.categories)
     except ValueError as e:
         parser.error(str(e))
-
-    # Enforce correct pairing of flags
+    
     if args.flow == "custom" and not parsed_categories:
         parser.error("--categories is required when --flow custom "
                      "(e.g., --categories 'analytics=off,advertising=off,functional=on')")
     if parsed_categories and args.flow != "custom":
         parser.error("--categories can only be used with --flow custom")
 
+    # Build optional login_flow dict (only if --login-auto)
+    login_flow = None
+    if args.login_auto:
+        # Resolve credentials from environment first, then fall back to CLI values
+        username = None
+        password = None
+
+        if args.login_username_env:
+            username = os.environ.get(args.login_username_env)
+        if args.login_password_env:
+            password = os.environ.get(args.login_password_env)
+
+        # Fallback to direct CLI flags if env vars are not set
+        if not username:
+            username = args.username
+        if not password:
+            password = args.password
+
+        if not username or not password:
+            logging.warning(
+                "Login auto enabled but username/password are missing; "
+                "login will likely fail (check --login-username-env/--login-password-env or --username/--password)."
+            )
+
+        login_flow = {
+            # no login_url -> auto-discovery in crawler
+            "success_selector": args.login_success_selector,
+            "username": username,
+            "password": password,
+            "storage_state_path": args.login_storage_state,
+        }
+
     results = asyncio.run(process_urls(
         urls=urls,
+        # results_function=crawl.store_crawl_results,
         batch_size=args.batch_size,
-        tracking_domains_list=blockers.get_domains(),
+        # tracking_domains_list=blockers.get_domains(),
+        tracking_domains_list=tracking_domains,
         headless=args.headless,
         screenshot=args.screenshot,
         results_db_file=args.db_file,
@@ -232,6 +323,8 @@ def cli():
         depth=args.depth,
         max_pages=args.max_pages,
         clicks=args.clicks,
+        login_flow=login_flow,
+        collect_domains=(not args.cookies_only),
     ))
 
     if args.show_output and len(results) < 25:
